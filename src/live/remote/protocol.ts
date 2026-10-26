@@ -53,8 +53,8 @@ export class ProtocolVersionError extends ProtocolError {
   }
 }
 
-type Check = (value: unknown) => boolean;
-type Shape = { required?: Record<string, Check>; optional?: Record<string, Check> };
+export type Check = (value: unknown) => boolean;
+export type Shape = { required?: Record<string, Check>; optional?: Record<string, Check> };
 
 const isId: Check = (value) =>
   typeof value === "number" && Number.isSafeInteger(value) && value >= 0;
@@ -63,7 +63,7 @@ const isMessage: Check = (value) =>
   isText(value) && (value as string).length <= MAX_FAILURE_MESSAGE_LENGTH;
 const isLevel: Check = (value) =>
   typeof value === "number" && Number.isFinite(value) && value >= 0 && value <= 1;
-const isBoolean: Check = (value) => typeof value === "boolean";
+export const isBoolean: Check = (value) => typeof value === "boolean";
 const isNodeId: Check = (value) => isText(value) && (value as string).length <= MAX_NODE_ID_LENGTH;
 const isTimeout: Check = (value) =>
   typeof value === "number" &&
@@ -97,7 +97,7 @@ const RESPONSE_SHAPES = new Map<boolean, Shape>([
   [false, { required: { error: isMessage } }],
 ]);
 
-function parseObject(text: string): Record<string, unknown> {
+export function parseObject(text: string): Record<string, unknown> {
   let value: unknown;
   try {
     value = JSON.parse(text);
@@ -116,7 +116,7 @@ function parseObject(text: string): Record<string, unknown> {
   return frame;
 }
 
-function validate(
+export function validate(
   frame: Record<string, unknown>,
   common: Record<string, Check>,
   shape: Shape | undefined,
@@ -136,7 +136,7 @@ function validate(
   }
 }
 
-function withoutVersion<T>(frame: Record<string, unknown>): T {
+export function withoutVersion<T>(frame: Record<string, unknown>): T {
   const { v: _version, ...rest } = frame;
   return rest as T;
 }

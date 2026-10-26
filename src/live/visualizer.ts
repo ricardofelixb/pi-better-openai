@@ -30,7 +30,7 @@ type RenderCache = {
   lines: string[];
 };
 
-function sanitizeTranscript(text: string): string {
+export function sanitizeTranscript(text: string): string {
   const withoutAnsi = text.replace(ANSI_ESCAPE_REGEXP, "");
   let safe = "";
   for (const character of withoutAnsi) {

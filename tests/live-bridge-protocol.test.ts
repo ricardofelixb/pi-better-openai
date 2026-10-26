@@ -148,7 +148,7 @@ describe("encodeBridgeFrame", () => {
       encodeBridgeFrame({ type: "ended", error: `boom\u0000\u001b[2J ${"x".repeat(5000)}` }),
     );
     expect(String(out.error).length).toBeLessThanOrEqual(MAX_ENDED_ERROR_LENGTH);
-    expect(String(out.error)).not.toMatch(/[\u0000-\u001f]/);
+    expect([...String(out.error)].every((character) => character.charCodeAt(0) > 31)).toBe(true);
     expect(decoded(encodeBridgeFrame({ type: "ended" }))).toEqual({ v: 1, type: "ended" });
   });
 
