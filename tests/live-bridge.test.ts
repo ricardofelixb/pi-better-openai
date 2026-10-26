@@ -328,6 +328,18 @@ describe("a call started from the socket", () => {
     expect(sessions[0]!.options.delegate).toBeTypeOf("function");
   });
 
+  test("speaks in the voice the phone names, for that call alone", async () => {
+    const { sessions } = await setup();
+    const { host } = await open();
+    host.send({ type: "hello" });
+    host.send({ type: "start", voice: "vale" });
+    const open_ = await host.next("request");
+    host.send({ type: "response", id: open_.id, ok: true });
+    await host.next("request");
+    expect(sessions).toHaveLength(1);
+    expect(sessions[0]!.options.voice).toBe("vale");
+  });
+
   test("the control frames never reach the media", async () => {
     const { sessions } = await setup();
     const { host } = await open();

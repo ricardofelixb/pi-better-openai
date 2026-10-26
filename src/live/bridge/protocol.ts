@@ -26,13 +26,17 @@ import {
   withoutVersion,
 } from "../remote/protocol.ts";
 import { sanitizeTranscript } from "../visualizer.ts";
+import { isLiveVoice, type LiveVoice } from "../voices.ts";
 
 export const MAX_TRANSCRIPT_LENGTH = 4_096;
 export const MAX_ENDED_ERROR_LENGTH = 2_048;
 
-/** What the phone may ask of the call itself, as opposed to its audio device. */
+/**
+ * What the phone may ask of the call itself, as opposed to its audio device. A start may name the
+ * voice for that call; without one the call speaks in the voice set in /openai-settings.
+ */
 export type BridgeControlFrame =
-  | { type: "start" }
+  | { type: "start"; voice?: LiveVoice }
   | { type: "stop" }
   | { type: "set-muted"; muted: boolean };
 
@@ -55,7 +59,7 @@ export type BridgeCallFrame =
 export type BridgeOutboundFrame = BridgeCallFrame | ClientFrame;
 
 const CONTROL_SHAPES = new Map<string, Shape>([
-  ["start", {}],
+  ["start", { optional: { voice: isLiveVoice } }],
   ["stop", {}],
   ["set-muted", { required: { muted: isBoolean } }],
 ]);

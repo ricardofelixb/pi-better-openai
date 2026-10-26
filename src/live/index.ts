@@ -37,6 +37,7 @@ import {
   type LiveFloorArbiterOptions,
 } from "./queue.ts";
 import { LiveVisualizer, LIVE_VISUALIZER_TOGGLE_KEY } from "./visualizer.ts";
+import type { LiveVoice } from "./voices.ts";
 
 export const LIVE_COMMAND = "live";
 export { LIVE_DELEGATION_MESSAGE_TYPE };
@@ -484,11 +485,14 @@ export function registerOpenAILive(
     ctx: ExtensionContext,
     connection: LiveBridgeConnection,
     takeControl: BridgedCall["takeControl"],
+    voice: LiveVoice | undefined,
   ): Promise<void> {
     let ended: { error?: string } = {};
     let owned = false;
     try {
-      const cfg = getConfig(ctx);
+      const settings = getConfig(ctx);
+      // the phone's choice of voice is for this call alone
+      const cfg = voice ? { ...settings, live: { ...settings.live, voice } } : settings;
       const refusal =
         ctx.mode !== "tui"
           ? "Live voice requires interactive TUI mode."
@@ -535,10 +539,15 @@ export function registerOpenAILive(
               return;
             }
             if (!bridgeCtx) return connection.close();
-            const call = startBridged(bridgeCtx, connection, (next) => {
-              handler = next;
-              for (const queued of waiting.splice(0)) next(queued);
-            }).catch(() => undefined);
+            const call = startBridged(
+              bridgeCtx,
+              connection,
+              (next) => {
+                handler = next;
+                for (const queued of waiting.splice(0)) next(queued);
+              },
+              frame.voice,
+            ).catch(() => undefined);
             bridgedCalls.add(call);
             void call.finally(() => bridgedCalls.delete(call));
           });

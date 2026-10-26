@@ -19,6 +19,13 @@ const frame = (body: Record<string, unknown>, v = 1) => JSON.stringify({ v, ...b
 describe("parseBridgeInbound", () => {
   test("accepts the three control frames the phone may send", () => {
     expect(parseBridgeInbound(frame({ type: "start" }))).toEqual({ type: "start" });
+    expect(parseBridgeInbound(frame({ type: "start", voice: "arbor" }))).toEqual({
+      type: "start",
+      voice: "arbor",
+    });
+    expect(() => parseBridgeInbound(frame({ type: "start", voice: "alloy" }))).toThrow(
+      ProtocolError,
+    );
     expect(parseBridgeInbound(frame({ type: "stop" }))).toEqual({ type: "stop" });
     expect(parseBridgeInbound(frame({ type: "set-muted", muted: true }))).toEqual({
       type: "set-muted",
