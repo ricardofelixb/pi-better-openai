@@ -67,7 +67,7 @@ function connectHost(path: string) {
   });
   const closed = new Promise<void>((resolve) => socket.once("close", () => resolve()));
   socket.on("error", () => undefined);
-  let cursor = 0;
+  const consumed = new Map<string, number>();
   return {
     seen,
     closed,
@@ -75,12 +75,16 @@ function connectHost(path: string) {
       socket.write(`${JSON.stringify({ v: 1, ...frame })}\n`),
     sendRaw: (text: string) => socket.write(text),
     end: () => socket.end(),
+    /** The next frame of this type that was not returned before, whatever else arrived between. */
     async next(type: string, timeoutMs = 3000): Promise<Frame> {
       const deadline = Date.now() + timeoutMs;
       for (;;) {
-        while (cursor < seen.length) {
-          const frame = seen[cursor++]!;
-          if (frame.type === type) return frame;
+        const index = seen.findIndex(
+          (frame, at) => frame.type === type && at >= (consumed.get(type) ?? 0),
+        );
+        if (index !== -1) {
+          consumed.set(type, index + 1);
+          return seen[index]!;
         }
         if (Date.now() > deadline) {
           throw new Error(`no ${type} frame; saw ${seen.map((frame) => frame.type).join(",")}`);

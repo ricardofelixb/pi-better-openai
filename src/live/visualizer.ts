@@ -18,6 +18,8 @@ export interface LiveVisualizerOptions {
   requestRender(): void;
   onStop(): void;
   onToggleMute(): void;
+  /** Where the audio device is, when it is not this computer (for example a phone). */
+  source?: string;
 }
 
 type RenderCache = {
@@ -234,7 +236,8 @@ export class LiveVisualizer implements Component {
       error: "error",
     };
     const status = `${icon} ${this.#phase}`;
-    const fullLabel = ` ${status} · space mute · esc end `;
+    const source = this.#options.source ? ` · ${this.#options.source}` : "";
+    const fullLabel = ` ${status}${source} · space mute · esc end `;
     const shortLabel = ` ${status} `;
     const label =
       innerWidth >= visibleWidth(fullLabel) + 1
