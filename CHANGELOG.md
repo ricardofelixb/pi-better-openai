@@ -5,6 +5,7 @@
 - Add experimental remote audio for `/live`: set `live.audioHost` to an SSH host and the realtime session, Codex login, and coding agent stay on the Pi computer while a Linux computer's microphone and speakers carry the audio. Unset by default, which changes nothing.
 - Set `live.audioHost` to `auto` to use the computer you are connected from, found from your SSH session or from the clients attached to a stock Herdr server, and named through Tailscale. With several computers attached to the same Herdr, `/live` asks which one you are at (every time, nothing is remembered; Escape starts nothing). It refuses rather than guess when it cannot tell, and where nobody can be asked. On macOS and Windows it uses the local audio when no remote Herdr client is attached, so a synced `auto` keeps plain local `/live` working there.
 - Adapt the Tailscale lookup of an SSH connection from [`herdr-codex-voice`](https://github.com/ricardofelixb/herdr-codex-voice) (MIT; see `THIRD_PARTY_NOTICES.md`).
+- Add experimental live voice from a phone through [Ovis](https://github.com/ricardofelixb/ovis): inside a Herdr pane in the TUI, Pi listens on a private per-process socket (`~/.pi/agent/live-bridge/<pid>.sock`) where Ovis starts and ends `/live` and the phone's browser is the microphone and speaker. The Codex login, realtime session, and delegation stay in Pi, and no credential crosses the socket. It follows `live.enabled`, adds no setting, and leaves terminal `/live` and `live.audioHost` unchanged.
 
 ## 0.2.13
 
