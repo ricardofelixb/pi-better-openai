@@ -149,7 +149,7 @@ function makeContext(custom: unknown, notify = vi.fn(), select = vi.fn()) {
     mode: "tui",
     cwd: "/project",
     ui: { custom, notify, select },
-    sessionManager: { getSessionId: () => "session-7" },
+    sessionManager: { getSessionId: () => "session-7", getBranch: () => [] },
     modelRegistry: {},
   } as unknown as ExtensionCommandContext;
 }

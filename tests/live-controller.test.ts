@@ -136,6 +136,89 @@ describe("LiveSessionController", () => {
     expect(terminal).toHaveBeenCalledOnce();
   });
 
+  test("starts out knowing the chat, and hears what is typed during the call only silently", async () => {
+    let transportOptions: LiveTransportOptions | undefined;
+    const send = vi.fn(async (_message: LiveClientMessage) => undefined);
+    const controller = new LiveSessionController({
+      sessionId: "session-1",
+      chat: "User: My dog is called Biscuit.",
+      native: fakeNative(),
+      getCredentials: vi.fn(async () => ({ accessToken: "token", accountId: "account" })),
+      delegate: vi.fn(),
+      createTransport: (options) => {
+        transportOptions = options;
+        return {
+          connect: vi.fn(async () => undefined),
+          send,
+          setMuted: vi.fn(),
+          close: vi.fn(async () => undefined),
+        };
+      },
+      callbacks: {
+        onPhase: vi.fn(),
+        onLevels: vi.fn(),
+        onTranscript: vi.fn(),
+        onTerminal: vi.fn(),
+      },
+    });
+
+    await controller.start();
+    expect(transportOptions?.instructions).toContain("# Conversation so far");
+    expect(transportOptions?.instructions).toContain("User: My dog is called Biscuit.");
+
+    controller.handleAgentMessage({ role: "user", content: "Run the build." });
+    controller.handleAgentMessage({
+      role: "assistant",
+      content: [{ type: "text", text: "Building." }],
+      stopReason: "toolUse",
+    });
+    controller.handleAgentMessage({
+      role: "assistant",
+      content: [{ type: "text", text: "The build passed." }],
+      stopReason: "stop",
+    });
+    transportOptions?.callbacks.onEvent({
+      type: "delegation.created",
+      item: {
+        type: "delegation",
+        target: "client",
+        id: "delegation-1",
+        content: [{ type: "input_text", text: "Fix it." }],
+      },
+    });
+    controller.handleAgentMessage({
+      role: "assistant",
+      content: [{ type: "text", text: "Fixed." }],
+      stopReason: "stop",
+    });
+    await flushSends();
+
+    const silent = send.mock.calls
+      .map(([message]) => message)
+      .filter((message) => message.type === "session.context.append");
+    expect(silent).toEqual([
+      {
+        type: "session.context.append",
+        content: [
+          {
+            type: "input_text",
+            text: "Typed in the chat during the call. Do not read it out unless asked.\nUser: Run the build.",
+          },
+        ],
+      },
+      {
+        type: "session.context.append",
+        content: [
+          {
+            type: "input_text",
+            text: "Typed in the chat during the call. Do not read it out unless asked.\nAssistant: The build passed.",
+          },
+        ],
+      },
+    ]);
+    await controller.stop();
+  });
+
   test("owns no capture: the transport alone is created and connected on start", async () => {
     const createTransport = vi.fn((_options: LiveTransportOptions) => ({
       connect: vi.fn(async () => undefined),

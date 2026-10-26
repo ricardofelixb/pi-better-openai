@@ -238,7 +238,7 @@ Run `/live` or press `Ctrl+Shift+L` to open the realtime voice panel. `Ctrl+L` r
 - `Space` toggles microphone mute.
 - `Escape`, `Ctrl+C`, or `Ctrl+Shift+L` ends the call.
 - The waveform reacts to microphone RMS level and the panel footer shows connecting, listening, working, speaking, muted, or error state.
-- Streaming speech transcripts stay in the live panel. Coding and repository requests are delegated into the current pi agent session; normal tool and assistant output continues in the transcript, and the final result is spoken back through the live session.
+- The voice starts out knowing the session's recent chat (its text turns, without tool output, up to about 6,000 tokens), and hears what is typed during the call without reading it out. Streaming speech transcripts show in the live panel, and when the call ends what was said is saved to the session as a `Live call` message. Coding and repository requests are delegated into the current pi agent session; normal tool and assistant output continues in the transcript, and the final result is spoken back through the live session.
 
 Choose the spoken voice under **Live voice** in `/openai-settings`. Supported values are `arbor`, `breeze`, `cove`, `ember`, `juniper`, `maple`, `sol`, `spruce`, and `vale`.
 
@@ -268,7 +268,7 @@ The audio computer needs:
 
 Inside a [Herdr](https://github.com/herdrdev/herdr) pane, Pi also listens on a private socket, `~/.pi/agent/live-bridge/<pid>.sock`, so an app on the same computer can use a browser's microphone and speaker as the audio device of that pane's `/live`. [Ovis](https://github.com/ricardofelixb/ovis) does this for its Pi panes: tap the voice orb next to the composer on your phone and talk. It needs no setting and follows `live.enabled`; it is not offered outside Herdr, outside the interactive TUI, or on Windows.
 
-Pi keeps the Codex login, the realtime session, and the coding agent, and coding requests run in that pane with the pane's own model. Only signaling, mute state, levels, transcript text, and server events cross the socket, and no credential does. The socket is reachable only by your user (a private directory and mode `0600`), and Pi refuses to listen if the directory is not. The pane's panel shows `phone` in its footer; `Space` mutes the phone, and `Escape` ends the call, as with a local `/live`. Details are in [`src/live/remote/README.md`](src/live/remote/README.md#a-phone-through-ovis).
+Pi keeps the Codex login, the realtime session, and the coding agent, and coding requests run in that pane with the pane's own model. Only signaling, mute state, levels, transcript text, and server events cross the socket, and no credential does. The socket is reachable only by your user (a private directory and mode `0600`), and Pi refuses to listen if the directory is not. The pane's panel shows `phone` in its footer and sits above the editor, which keeps the keyboard, so what is typed on the phone reaches the chat during the call. Mute and end on the phone; `/live` in the pane also ends the call. Details are in [`src/live/remote/README.md`](src/live/remote/README.md#a-phone-through-ovis).
 
 ## Image generation
 

@@ -24,28 +24,24 @@ const theme = {
 } as unknown as Theme;
 
 /** A Pi session's `ctx.ui.custom`: runs the factory like Pi does and resolves when it calls done. */
-function makeCustom() {
+// A call from Ovis shows above the editor, as a widget, and leaves the editor the keyboard.
+function makeWidget() {
   const captured: { component?: Component & { dispose?(): void } } = {};
-  const custom = vi.fn(async (factory: unknown) => {
+  const setWidget = vi.fn((_key: string, factory: unknown) => {
+    if (typeof factory !== "function") {
+      captured.component?.dispose?.();
+      return;
+    }
     const tui = {
       requestRender: vi.fn(),
       terminal: { write: vi.fn() },
       addInputListener: vi.fn(() => vi.fn()),
     };
-    const result = await new Promise<unknown>((resolve) => {
-      captured.component = (
-        factory as (
-          tui: unknown,
-          theme: Theme,
-          keybindings: object,
-          done: (value: unknown) => void,
-        ) => Component & { dispose?(): void }
-      )(tui, theme, {}, resolve);
-    });
-    captured.component?.dispose?.();
-    return result;
+    captured.component = (
+      factory as (tui: unknown, theme: Theme) => Component & { dispose?(): void }
+    )(tui, theme);
   });
-  return { captured, custom };
+  return { captured, setWidget };
 }
 
 /** The phone's side of the socket. */
@@ -191,17 +187,29 @@ async function setup(
     },
   );
   live.push(registration);
-  const { captured, custom } = makeCustom();
+  const { captured, setWidget } = makeWidget();
+  const custom = vi.fn();
   const notify = vi.fn();
   const ctx = {
     mode: overrides.mode ?? "tui",
     cwd: "/project",
-    ui: { custom, notify, select: vi.fn() },
-    sessionManager: { getSessionId: () => "session-7" },
+    ui: { custom, setWidget, notify, select: vi.fn() },
+    sessionManager: { getSessionId: () => "session-7", getBranch: () => [] },
     modelRegistry: {},
   } as unknown as ExtensionCommandContext;
   await registration.attachBridge(ctx);
-  return { registration, handlers, sessions, captured, custom, notify, ctx, createArbiter };
+  return {
+    registration,
+    pi,
+    handlers,
+    sessions,
+    captured,
+    custom,
+    setWidget,
+    notify,
+    ctx,
+    createArbiter,
+  };
 }
 
 async function open() {
@@ -294,7 +302,7 @@ describe("the live bridge socket", () => {
 
 describe("a call started from the socket", () => {
   test("runs a session whose media is the connection, and reports the call", async () => {
-    const { sessions, createArbiter, custom } = await setup();
+    const { sessions, createArbiter, custom, setWidget } = await setup();
     const { host } = await open();
     host.send({ type: "hello" });
     host.send({ type: "start" });
@@ -314,7 +322,8 @@ describe("a call started from the socket", () => {
     });
     expect(sessions).toHaveLength(1);
     expect(sessions[0]!.offer).toBe("v=0");
-    expect(custom).toHaveBeenCalledOnce();
+    expect(setWidget).toHaveBeenCalledWith("better-openai-live", expect.any(Function));
+    expect(custom).not.toHaveBeenCalled();
     expect(createArbiter).not.toHaveBeenCalled();
     expect(sessions[0]!.options.delegate).toBeTypeOf("function");
   });
@@ -365,8 +374,10 @@ describe("a call started from the socket", () => {
   });
 
   test("ending it in the terminal tells the phone", async () => {
-    const { host, captured, sessions } = await startCall();
-    captured.component!.handleInput!("\u001b");
+    const { host, pi, ctx, sessions } = await startCall();
+    // the keyboard stays with the editor, so the terminal ends it with /live
+    const live = vi.mocked(pi.registerCommand).mock.calls[0]![1];
+    await live.handler("", ctx);
     expect(await host.next("ended")).toEqual({ v: 1, type: "ended" });
     await host.closed;
     expect(sessions[0]!.stop).toHaveBeenCalled();

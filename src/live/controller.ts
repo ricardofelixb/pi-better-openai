@@ -1,9 +1,11 @@
 import type { CodexCredentials } from "../codex-auth.ts";
+import { typedContext, withChat } from "./context.ts";
 import { type LiveMediaFactory, OUTPUT_ACTIVE_LEVEL } from "./media.ts";
 import { loadLiveNative, type LiveNativeBindings } from "./native.ts";
 import {
   buildDelegationContextAppend,
   buildSessionClose,
+  buildSessionContextAppend,
   chunkLiveContext,
   type LiveClientMessage,
   type LiveServerEvent,
@@ -56,6 +58,8 @@ export interface LiveSessionControllerOptions {
   getCredentials(signal?: AbortSignal): Promise<CodexCredentials | undefined>;
   delegate(request: string): void;
   callbacks: LiveSessionCallbacks;
+  /** The session's text chat so far, which the voice starts out knowing. */
+  chat?: string;
   voice?: string;
   signal?: AbortSignal;
   native?: LiveNativeBindings;
@@ -167,7 +171,7 @@ export class LiveSessionController {
       const transport = this.#createTransport({
         getCredentials: this.#options.getCredentials,
         sessionId: this.#options.sessionId,
-        instructions: LIVE_INSTRUCTIONS,
+        instructions: withChat(LIVE_INSTRUCTIONS, this.#options.chat ?? ""),
         voice: this.#voice,
         signal: this.#options.signal,
         native,
@@ -207,9 +211,18 @@ export class LiveSessionController {
   }
 
   handleAgentMessage(message: unknown): void {
-    if (!this.#activeDelegationId || this.#stopped) return;
+    if (this.#stopped) return;
     const snapshot = extractAssistantSnapshot(message);
-    if (!snapshot) return;
+    if (!this.#activeDelegationId || !snapshot) {
+      // typed in the chat, or answered there without the call asking: the voice knows, silently
+      if (snapshot?.stopReason === "toolUse") return;
+      const context = typedContext(message);
+      if (context) {
+        for (const chunk of chunkLiveContext(context))
+          this.#queueSend(buildSessionContextAppend(chunk));
+      }
+      return;
+    }
     if (snapshot.stopReason === "toolUse") {
       if (!snapshot.text) return;
       for (const chunk of chunkLiveContext(snapshot.text)) {

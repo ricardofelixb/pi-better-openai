@@ -1,5 +1,9 @@
-import { type ExtensionAPI, type ExtensionContext } from "@earendil-works/pi-coding-agent";
-import { Text } from "@earendil-works/pi-tui";
+import {
+  type ExtensionAPI,
+  type ExtensionContext,
+  type Theme,
+} from "@earendil-works/pi-coding-agent";
+import { type Component, Text, type TUI } from "@earendil-works/pi-tui";
 import { fileURLToPath } from "node:url";
 import { getCodexCredentials } from "../codex-auth.ts";
 import type { ResolvedConfig } from "../config.ts";
@@ -8,6 +12,12 @@ import { piAgentDir } from "../paths.ts";
 import { createBridgeMediaFactory } from "./bridge/media.ts";
 import type { BridgeControlFrame } from "./bridge/protocol.ts";
 import { type LiveBridgeConnection, LiveBridgeServer } from "./bridge/socket.ts";
+import {
+  LIVE_DELEGATION_MESSAGE_TYPE,
+  LIVE_TRANSCRIPT_HEADING,
+  LIVE_TRANSCRIPT_MESSAGE_TYPE,
+  recentChat,
+} from "./context.ts";
 import {
   type LivePhase,
   LiveSessionController,
@@ -29,8 +39,9 @@ import {
 import { LiveVisualizer, LIVE_VISUALIZER_TOGGLE_KEY } from "./visualizer.ts";
 
 export const LIVE_COMMAND = "live";
-export const LIVE_DELEGATION_MESSAGE_TYPE = "better-openai-live-delegation";
+export { LIVE_DELEGATION_MESSAGE_TYPE };
 export const LIVE_FOCUS_SETTLE_MS = 400;
+const LIVE_WIDGET_KEY = "better-openai-live";
 
 interface LiveSessionRuntime {
   start(): Promise<void>;
@@ -52,6 +63,38 @@ interface ActiveLiveRun {
 }
 
 type LiveUiResult = { error?: Error };
+
+type LiveUiFactory = (
+  tui: TUI,
+  theme: Theme,
+  done: (result: LiveUiResult) => void,
+) => Component & { dispose?(): void };
+
+// A call from Ovis shows above the editor and leaves it the keyboard, so what is typed on the
+// phone reaches the chat; the phone has its own mute and end. Any other call takes the keyboard.
+function showLiveUi(
+  ctx: ExtensionContext,
+  aboveEditor: boolean,
+  factory: LiveUiFactory,
+): Promise<LiveUiResult> {
+  if (!aboveEditor) {
+    return ctx.ui.custom<LiveUiResult>((tui, theme, _keybindings, done) =>
+      factory(tui, theme, done),
+    );
+  }
+  return new Promise((resolve) => {
+    let finished = false;
+    ctx.ui.setWidget(LIVE_WIDGET_KEY, (tui, theme) =>
+      factory(tui, theme, (result) => {
+        if (finished) return;
+        finished = true;
+        // after the factory has returned, so a call that ends at once still takes its widget away
+        setImmediate(() => ctx.ui.setWidget(LIVE_WIDGET_KEY, undefined));
+        resolve(result);
+      }),
+    );
+  });
+}
 
 type LiveSessionFactory = (options: LiveSessionControllerOptions) => LiveSessionRuntime;
 
@@ -216,7 +259,10 @@ export function registerOpenAILive(
     target: MediaTarget | undefined,
     bridged?: BridgedCall,
   ): Promise<LiveUiResult> {
-    const result = await ctx.ui.custom<LiveUiResult>((tui, theme, _keybindings, done) => {
+    // what was said, in order, across every session the call runs: saved to the chat once it ends
+    const spoken = new Map<string, string>();
+    let generation = 0;
+    const result = await showLiveUi(ctx, bridged !== undefined, (tui, theme, done) => {
       let completed = false;
       let disposed = false;
       let session: LiveSessionRuntime | undefined;
@@ -238,7 +284,7 @@ export function registerOpenAILive(
         requestRender: () => tui.requestRender(),
         onStop: () => finishUi({}),
         onToggleMute: () => session?.toggleMute(),
-        ...(bridged ? { source: "phone" } : {}),
+        ...(bridged ? { source: "phone", keys: false } : {}),
       });
       visualizer.setPhase(bridged ? "connecting" : "standby");
       const bridgedMedia = bridged ? createBridgeMediaFactory(bridged.connection) : undefined;
@@ -260,8 +306,11 @@ export function registerOpenAILive(
       const activateSession = () => {
         if (completed || session) return;
         sessionParked = false;
+        generation += 1;
+        const said = generation;
         const created = createSession({
           sessionId: ctx.sessionManager.getSessionId(),
+          chat: recentChat(ctx.sessionManager.getBranch()),
           voice: cfg.live.voice,
           getCredentials: (signal) => getCodexCredentials(ctx, signal),
           resolveMedia: bridgedMedia
@@ -290,6 +339,13 @@ export function registerOpenAILive(
             },
             onLevels: (input) => visualizer.setInputLevel(input),
             onTranscript: (transcript: LiveTranscript | undefined) => {
+              if (transcript) {
+                const speaker = transcript.role === "user" ? "User" : "Assistant";
+                spoken.set(
+                  `${said}:${transcript.role}:${transcript.turn}`,
+                  `${speaker}: ${transcript.text}`,
+                );
+              }
               visualizer.setTranscript(transcript);
               bridged?.connection.send(
                 transcript ? { type: "transcript", ...transcript } : { type: "transcript-clear" },
@@ -406,6 +462,18 @@ export function registerOpenAILive(
       if (activeRun === run) activeRun = undefined;
       if (settling === cleanup) settling = undefined;
     }
+    if (spoken.size > 0) {
+      // into the chat, so the session and the next call know what was said; never starts a turn
+      pi.sendMessage(
+        {
+          customType: LIVE_TRANSCRIPT_MESSAGE_TYPE,
+          content: `${LIVE_TRANSCRIPT_HEADING}\n${[...spoken.values()].join("\n")}`,
+          display: true,
+          details: { source: "live" },
+        },
+        { triggerTurn: false },
+      );
+    }
     if (result.error) ctx.ui.notify(sanitizeDiagnosticError(result.error.message), "error");
     return result;
   }
@@ -495,6 +563,12 @@ export function registerOpenAILive(
   pi.registerMessageRenderer(LIVE_DELEGATION_MESSAGE_TYPE, (message, _options, theme) => {
     const text = messageText(message.content).trim();
     const label = theme.fg("accent", theme.bold("Live request"));
+    return new Text(`${label}\n${theme.fg("customMessageText", text)}`, 1, 0);
+  });
+
+  pi.registerMessageRenderer(LIVE_TRANSCRIPT_MESSAGE_TYPE, (message, _options, theme) => {
+    const text = messageText(message.content).replace(LIVE_TRANSCRIPT_HEADING, "").trim();
+    const label = theme.fg("accent", theme.bold("Live call"));
     return new Text(`${label}\n${theme.fg("customMessageText", text)}`, 1, 0);
   });
 

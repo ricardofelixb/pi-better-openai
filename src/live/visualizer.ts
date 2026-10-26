@@ -20,6 +20,8 @@ export interface LiveVisualizerOptions {
   onToggleMute(): void;
   /** Where the audio device is, when it is not this computer (for example a phone). */
   source?: string;
+  /** False when the keyboard stays with the editor, so the label offers no keys. */
+  keys?: boolean;
 }
 
 type RenderCache = {
@@ -237,7 +239,8 @@ export class LiveVisualizer implements Component {
     };
     const status = `${icon} ${this.#phase}`;
     const source = this.#options.source ? ` · ${this.#options.source}` : "";
-    const fullLabel = ` ${status}${source} · space mute · esc end `;
+    const keys = this.#options.keys === false ? "" : " · space mute · esc end";
+    const fullLabel = ` ${status}${source}${keys} `;
     const shortLabel = ` ${status} `;
     const label =
       innerWidth >= visibleWidth(fullLabel) + 1
