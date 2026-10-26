@@ -18,6 +18,10 @@ export interface LiveVisualizerOptions {
   requestRender(): void;
   onStop(): void;
   onToggleMute(): void;
+  /** Where the audio device is, when it is not this computer (for example a phone). */
+  source?: string;
+  /** False when the keyboard stays with the editor, so the label offers no keys. */
+  keys?: boolean;
 }
 
 type RenderCache = {
@@ -30,7 +34,7 @@ type RenderCache = {
   lines: string[];
 };
 
-function sanitizeTranscript(text: string): string {
+export function sanitizeTranscript(text: string): string {
   const withoutAnsi = text.replace(ANSI_ESCAPE_REGEXP, "");
   let safe = "";
   for (const character of withoutAnsi) {
@@ -234,7 +238,9 @@ export class LiveVisualizer implements Component {
       error: "error",
     };
     const status = `${icon} ${this.#phase}`;
-    const fullLabel = ` ${status} · space mute · esc end `;
+    const source = this.#options.source ? ` · ${this.#options.source}` : "";
+    const keys = this.#options.keys === false ? "" : " · space mute · esc end";
+    const fullLabel = ` ${status}${source}${keys} `;
     const shortLabel = ` ${status} `;
     const label =
       innerWidth >= visibleWidth(fullLabel) + 1

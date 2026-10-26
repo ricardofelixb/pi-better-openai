@@ -1,19 +1,17 @@
 import type { CodexCredentials } from "../codex-auth.ts";
-import { loadLiveNative, type LiveAudioCapture, type LiveNativeBindings } from "./native.ts";
+import { typedContext, withChat } from "./context.ts";
+import { type LiveMediaFactory, OUTPUT_ACTIVE_LEVEL } from "./media.ts";
+import { loadLiveNative, type LiveNativeBindings } from "./native.ts";
 import {
   buildDelegationContextAppend,
   buildSessionClose,
+  buildSessionContextAppend,
   chunkLiveContext,
   type LiveClientMessage,
   type LiveServerEvent,
 } from "./protocol.ts";
 import { CodexLiveTransport, type LiveTransportOptions } from "./transport.ts";
 import { DEFAULT_LIVE_VOICE } from "./voices.ts";
-
-const OUTPUT_ACTIVE_LEVEL = 0.015;
-const MIN_BARGE_IN_LEVEL = 0.04;
-const OUTPUT_ECHO_RATIO = 0.65;
-const DIGITAL_SILENCE_SAMPLE_LIMIT = 32_000;
 
 const LIVE_INSTRUCTIONS = `You are Better OpenAI Live, the realtime voice surface of one unified coding assistant.
 
@@ -51,7 +49,6 @@ export interface LiveSessionCallbacks {
 export interface LiveTransport {
   connect(): Promise<void>;
   send(message: LiveClientMessage): Promise<void>;
-  pushAudio(samples: Float32Array): void;
   setMuted(muted: boolean): void;
   close(): Promise<void>;
 }
@@ -61,14 +58,17 @@ export interface LiveSessionControllerOptions {
   getCredentials(signal?: AbortSignal): Promise<CodexCredentials | undefined>;
   delegate(request: string): void;
   callbacks: LiveSessionCallbacks;
+  /** The session's text chat so far, which the voice starts out knowing. */
+  chat?: string;
   voice?: string;
   signal?: AbortSignal;
   native?: LiveNativeBindings;
   createTransport?: (options: LiveTransportOptions) => LiveTransport;
-  createAudioCapture?: (
-    native: LiveNativeBindings,
-    onAudio: (error: Error | null, samples: Float32Array) => void,
-  ) => LiveAudioCapture;
+  /**
+   * Chooses where the media of this session lives, each time it starts. Undefined keeps the
+   * default, this computer; a refusal fails the start before anything is opened.
+   */
+  resolveMedia?(signal?: AbortSignal): Promise<LiveMediaFactory | undefined>;
 }
 
 type AssistantSnapshot = {
@@ -83,21 +83,6 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 
 function errorFrom(cause: unknown): Error {
   return cause instanceof Error ? cause : new Error(String(cause));
-}
-
-function clampLevel(level: number): number {
-  if (!Number.isFinite(level) || level <= 0) return 0;
-  return Math.min(1, level);
-}
-
-export function microphoneLevel(samples: Float32Array): number {
-  if (samples.length === 0) return 0;
-  let sumSquares = 0;
-  for (let index = 0; index < samples.length; index += 1) {
-    const sample = samples[index] ?? 0;
-    sumSquares += sample * sample;
-  }
-  return clampLevel(Math.sqrt(sumSquares / samples.length));
 }
 
 export function extractAssistantSnapshot(message: unknown): AssistantSnapshot | undefined {
@@ -121,10 +106,8 @@ export class LiveSessionController {
   readonly #callbacks: LiveSessionCallbacks;
   readonly #voice: string;
   readonly #createTransport: (options: LiveTransportOptions) => LiveTransport;
-  readonly #createAudioCapture: LiveSessionControllerOptions["createAudioCapture"];
   #native: LiveNativeBindings | undefined;
   #transport: LiveTransport | undefined;
-  #recorder: LiveAudioCapture | undefined;
   #sendChain: Promise<void> = Promise.resolve();
   #stopPromise: Promise<void> | undefined;
   #started = false;
@@ -135,8 +118,6 @@ export class LiveSessionController {
   #phase: LivePhase = "connecting";
   #inputLevel = 0;
   #outputLevel = 0;
-  #digitalSilenceSampleCount = 0;
-  #microphoneSignalDetected = false;
   #activeDelegationId: string | undefined;
   #pendingAgentFinal = "";
   #userTranscript = "";
@@ -154,7 +135,6 @@ export class LiveSessionController {
     this.#native = options.native;
     this.#createTransport =
       options.createTransport ?? ((transportOptions) => new CodexLiveTransport(transportOptions));
-    this.#createAudioCapture = options.createAudioCapture;
   }
 
   get phase(): LivePhase {
@@ -179,33 +159,29 @@ export class LiveSessionController {
     this.#emitTranscript(undefined);
 
     try {
+      // Awaited only when there is something to wait for, so the default path keeps its timing.
+      const createMedia = this.#options.resolveMedia
+        ? await this.#options.resolveMedia(this.#options.signal)
+        : undefined;
+      if (this.#stopped) {
+        throw this.#failure ?? new Error("The live session stopped while connecting.");
+      }
       const native = this.#native ?? loadLiveNative();
       this.#native = native;
       const transport = this.#createTransport({
         getCredentials: this.#options.getCredentials,
         sessionId: this.#options.sessionId,
-        instructions: LIVE_INSTRUCTIONS,
+        instructions: withChat(LIVE_INSTRUCTIONS, this.#options.chat ?? ""),
         voice: this.#voice,
         signal: this.#options.signal,
         native,
+        ...(createMedia ? { createMedia } : {}),
         callbacks: {
           onEvent: (event) => this.#guardEvent(() => this.#handleLiveEvent(event)),
-          onOutputLevel: (level) => this.#guardEvent(() => this.#handleOutputLevel(level)),
+          onLevels: (input, output) => this.#guardEvent(() => this.#handleLevels(input, output)),
         },
       });
       this.#transport = transport;
-      const onAudio = (error: Error | null, samples: Float32Array) => {
-        if (error) this.#reportFailure(error);
-        else this.#handleMicrophoneAudio(samples);
-      };
-      const recorder = this.#createAudioCapture
-        ? this.#createAudioCapture(native, onAudio)
-        : new native.AudioCapture(16_000, onAudio);
-      if (this.#stopped) {
-        recorder.stop();
-        throw this.#failure ?? new Error("The live session stopped while recording began.");
-      }
-      this.#recorder = recorder;
       await transport.connect();
       if (this.#stopped)
         throw this.#failure ?? new Error("The live session stopped while connecting.");
@@ -235,9 +211,18 @@ export class LiveSessionController {
   }
 
   handleAgentMessage(message: unknown): void {
-    if (!this.#activeDelegationId || this.#stopped) return;
+    if (this.#stopped) return;
     const snapshot = extractAssistantSnapshot(message);
-    if (!snapshot) return;
+    if (!this.#activeDelegationId || !snapshot) {
+      // typed in the chat, or answered there without the call asking: the voice knows, silently
+      if (snapshot?.stopReason === "toolUse") return;
+      const context = typedContext(message);
+      if (context) {
+        for (const chunk of chunkLiveContext(context))
+          this.#queueSend(buildSessionContextAppend(chunk));
+      }
+      return;
+    }
     if (snapshot.stopReason === "toolUse") {
       if (!snapshot.text) return;
       for (const chunk of chunkLiveContext(snapshot.text)) {
@@ -273,14 +258,11 @@ export class LiveSessionController {
   async #stop(): Promise<void> {
     this.#stopped = true;
     let cleanupError: Error | undefined;
-    const recorder = this.#recorder;
-    this.#recorder = undefined;
-    if (recorder) {
-      try {
-        recorder.stop();
-      } catch (cause) {
-        cleanupError = errorFrom(cause);
-      }
+    // Stop forwarding the microphone now; the transport releases capture when it closes.
+    try {
+      this.#transport?.setMuted(true);
+    } catch (cause) {
+      cleanupError = errorFrom(cause);
     }
 
     await this.#sendChain;
@@ -355,42 +337,12 @@ export class LiveSessionController {
     }
   }
 
-  #handleOutputLevel(level: number): void {
-    this.#outputLevel = clampLevel(level);
+  #handleLevels(input: number, output: number): void {
+    const outputChanged = output !== this.#outputLevel;
+    this.#inputLevel = input;
+    this.#outputLevel = output;
     this.#emitLevels();
-    if (!this.#activeDelegationId) this.#refreshAudioPhase();
-  }
-
-  #handleMicrophoneAudio(samples: Float32Array): void {
-    if (this.#stopped || !this.#transport || this.#muted) return;
-    if (!this.#microphoneSignalDetected) {
-      const hasSignal = samples.some((sample) => sample !== 0);
-      if (hasSignal) {
-        this.#microphoneSignalDetected = true;
-      } else {
-        this.#digitalSilenceSampleCount += samples.length;
-        if (this.#digitalSilenceSampleCount >= DIGITAL_SILENCE_SAMPLE_LIMIT) {
-          const localtermHint =
-            process.platform === "darwin" && process.env.LOCALTERM
-              ? " Run `localterm install`, restart LocalTerm, and allow its microphone prompt."
-              : " Check your operating system microphone permission and selected input device.";
-          this.#reportFailure(
-            new Error(`Microphone input contains only digital silence.${localtermHint}`),
-          );
-          return;
-        }
-      }
-    }
-    this.#inputLevel = microphoneLevel(samples);
-    this.#emitLevels();
-    const outputActive = this.#outputLevel > OUTPUT_ACTIVE_LEVEL;
-    const echoThreshold = Math.max(MIN_BARGE_IN_LEVEL, this.#outputLevel * OUTPUT_ECHO_RATIO);
-    if (outputActive && this.#inputLevel < echoThreshold) return;
-    try {
-      this.#transport.pushAudio(samples);
-    } catch (cause) {
-      this.#reportFailure(errorFrom(cause));
-    }
+    if (outputChanged && !this.#activeDelegationId) this.#refreshAudioPhase();
   }
 
   #addTranscript(role: LiveTranscript["role"], text: string): void {

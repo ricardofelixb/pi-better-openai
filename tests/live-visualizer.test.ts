@@ -60,6 +60,25 @@ describe("LiveVisualizer", () => {
     }
   });
 
+  test("names the device in the footer when it is not this computer", () => {
+    const visualizer = new LiveVisualizer({
+      theme,
+      requestRender: vi.fn(),
+      onStop: vi.fn(),
+      onToggleMute: vi.fn(),
+      source: "phone",
+    });
+    try {
+      visualizer.setPhase("listening");
+      expect(visualizer.render(60).join("\n")).toContain(
+        "● listening · phone · space mute · esc end",
+      );
+      expect(visualizer.render(26).join("\n")).toContain("● listening ");
+    } finally {
+      visualizer.dispose();
+    }
+  });
+
   test("animates through requestRender and stops its timer on dispose", () => {
     vi.useFakeTimers();
     const requestRender = vi.fn();
