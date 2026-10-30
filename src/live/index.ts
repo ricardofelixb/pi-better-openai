@@ -1,6 +1,7 @@
 import {
   type ExtensionAPI,
   type ExtensionContext,
+  keyHint,
   type Theme,
 } from "@earendil-works/pi-coding-agent";
 import { type Component, Text, type TUI } from "@earendil-works/pi-tui";
@@ -575,9 +576,15 @@ export function registerOpenAILive(
     return new Text(`${label}\n${theme.fg("customMessageText", text)}`, 1, 0);
   });
 
-  pi.registerMessageRenderer(LIVE_TRANSCRIPT_MESSAGE_TYPE, (message, _options, theme) => {
+  pi.registerMessageRenderer(LIVE_TRANSCRIPT_MESSAGE_TYPE, (message, options, theme) => {
     const text = messageText(message.content).replace(LIVE_TRANSCRIPT_HEADING, "").trim();
     const label = theme.fg("accent", theme.bold("Live call"));
+    // Folded like tool output: the transcript only opens on the expand key.
+    if (!options.expanded) {
+      const lines = text.split("\n").length;
+      const hint = keyHint("app.tools.expand", "to expand");
+      return new Text(`${label} ${theme.fg("dim", `· ${lines} lines`)} ${hint}`, 1, 0);
+    }
     return new Text(`${label}\n${theme.fg("customMessageText", text)}`, 1, 0);
   });
 
