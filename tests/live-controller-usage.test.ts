@@ -92,7 +92,10 @@ describe("billed seconds", () => {
   });
 
   test("sum over the sessions of a call, and a parked call stops counting", async () => {
-    const { controller, sessions, usage } = harness({ idleHangupSeconds: 0 });
+    const { controller, sessions, usage } = harness({
+      idleHangupSeconds: 0,
+      parkAfterSeconds: 20,
+    });
     await controller.start();
     sessions[0]!.emit(DELEGATION);
     await seconds(20);
