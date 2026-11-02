@@ -25,6 +25,11 @@ import {
 import { MAX_FRAME_BYTES } from "../src/live/remote/protocol.ts";
 import { makeResolvedConfig } from "./helpers.ts";
 
+vi.mock("../src/usage.ts", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../src/usage.ts")>()),
+  requestCodexUsage: vi.fn(async () => undefined),
+}));
+
 type Frame = Record<string, unknown> & { type: string };
 
 const lineOf = (body: Record<string, unknown>) => `${JSON.stringify({ v: 1, ...body })}\n`;
@@ -418,7 +423,7 @@ function makeWidget() {
 function makeSession(options: LiveSessionControllerOptions) {
   const stub = {
     options,
-    media: undefined as undefined | { close(): Promise<void> },
+    media: undefined as undefined | { close(): Promise<void>; park?(): Promise<void> },
     start: vi.fn(async () => {
       options.callbacks.onPhase("connecting");
       const factory = await options.resolveMedia!();
@@ -432,6 +437,7 @@ function makeSession(options: LiveSessionControllerOptions) {
     }),
     toggleMute: vi.fn(),
     handleAgentMessage: vi.fn(),
+    resume: vi.fn(),
     handleAgentSettled: vi.fn(),
   };
   return stub;
@@ -584,6 +590,34 @@ describe("the endpoint of a live voice registration", () => {
     expect(harness.sessions[0]!.stop).toHaveBeenCalled();
     await vi.waitFor(() => expect(endpoint.status()).toEqual({ available: true, busy: false }));
     expect(harness.notify).not.toHaveBeenCalled();
+  });
+
+  test("carries a phone's features, and the park, usage and resume frames, across the relay", async () => {
+    const harness = register();
+    const { port } = await connectCall(harness);
+    const phone = connectPhone(port);
+    await phone.opened;
+    phone.send({ type: "hello", features: ["park", "usage"] });
+    const open = await phone.next("request");
+    phone.send({ type: "response", id: open.id, ok: true });
+    const offer = await phone.next("request");
+    phone.send({ type: "response", id: offer.id, ok: true, sdp: "v=0" });
+    await phone.next("phase");
+    await phone.next("phase");
+
+    const session = harness.sessions[0]!;
+    expect(session.options.canPark?.()).toBe(true);
+    await session.media!.park!();
+    session.options.callbacks.onPhase("parked");
+    session.options.callbacks.onUsage?.(20);
+    expect(await phone.next("park")).toEqual({ v: 1, type: "park" });
+    expect(await phone.next("phase")).toEqual({ v: 1, type: "phase", phase: "parked" });
+    expect(await phone.next("usage")).toEqual({ v: 1, type: "usage", seconds: 20 });
+
+    phone.send({ type: "resume" });
+    await vi.waitFor(() => expect(session.resume).toHaveBeenCalledOnce());
+    phone.send({ type: "stop" });
+    expect(await phone.next("ended")).toEqual({ v: 1, type: "ended" });
   });
 
   test("takes the voice from the call's options", async () => {
