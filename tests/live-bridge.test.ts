@@ -429,13 +429,17 @@ describe("a call started from the socket", () => {
     expect(await host.next("usage")).toMatchObject({ seconds: 30 });
 
     // the session closing adds its last seconds, which the phone hears before the end
-    sessions[0]!.stop.mockImplementationOnce(async () => sessions[0]!.options.callbacks.onUsage?.(41));
+    sessions[0]!.stop.mockImplementationOnce(async () =>
+      sessions[0]!.options.callbacks.onUsage?.(41),
+    );
     host.send({ type: "stop" });
     expect(await host.next("usage")).toMatchObject({ seconds: 41 });
     await host.next("ended");
     const types = host.seen.map((frame) => frame.type);
     expect(types.lastIndexOf("usage")).toBeLessThan(types.indexOf("ended"));
-    expect(host.seen.filter((frame) => frame.type === "usage").at(-1)).toMatchObject({ seconds: 41 });
+    expect(host.seen.filter((frame) => frame.type === "usage").at(-1)).toMatchObject({
+      seconds: 41,
+    });
   });
 
   test("never sends usage to a phone that did not say it understands it", async () => {
@@ -450,8 +454,6 @@ describe("a call started from the socket", () => {
     const parking = await startCall(["park"]);
     expect(parking.sessions[0]!.options.canPark?.()).toBe(true);
     parking.sessions[0]!.options.callbacks.onPhase("parked");
-    expect(await parking.host.next("phase")).toMatchObject({ phase: "connecting" });
-    expect(await parking.host.next("phase")).toMatchObject({ phase: "listening" });
     expect(await parking.host.next("phase")).toMatchObject({ phase: "parked" });
 
     const fixed = await startCall();

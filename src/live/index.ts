@@ -10,6 +10,7 @@ import { getCodexCredentials } from "../codex-auth.ts";
 import type { ResolvedConfig } from "../config.ts";
 import { sanitizeDiagnosticError } from "../format.ts";
 import { piAgentDir } from "../paths.ts";
+import { requestCodexUsage } from "../usage.ts";
 import { createBridgeMediaFactory } from "./bridge/media.ts";
 import type { BridgeControlFrame } from "./bridge/protocol.ts";
 import {
@@ -25,13 +26,13 @@ import {
   recentChat,
 } from "./context.ts";
 import {
-  type LivePhase,
   LiveSessionController,
   type LiveSessionControllerOptions,
   type LiveTranscript,
 } from "./controller.ts";
 import { attachFocusReporting, probeFocusReporting, type FocusTerminalHandle } from "./focus.ts";
 import { createLivePhoneEndpoint, LIVE_PHONE_EVENT } from "./phone/endpoint.ts";
+import { fiveHourUsedPercent, formatCallReadout } from "./readout.ts";
 import { type LauncherOptions, registerPersonalLauncher } from "./remote/host.ts";
 import { type MediaTarget, OriginCancelled } from "./remote/origin.ts";
 import { type RouteDependencies, resolveLiveMedia, resolveLiveTarget } from "./remote/route.ts";
@@ -50,11 +51,15 @@ export const LIVE_COMMAND = "live";
 export { LIVE_DELEGATION_MESSAGE_TYPE };
 export const LIVE_FOCUS_SETTLE_MS = 400;
 const LIVE_WIDGET_KEY = "better-openai-live";
+/** How long the plan's meter gets to answer before the call's readout goes without it. */
+const USAGE_READ_MS = 10_000;
 
 interface LiveSessionRuntime {
   start(): Promise<void>;
   stop(): Promise<void>;
   toggleMute(): void;
+  /** Brings a parked call back before its work is done. */
+  resume(): void;
   handleAgentMessage(message: unknown): void;
   handleAgentSettled(): void;
 }
@@ -71,6 +76,9 @@ interface ActiveLiveRun {
 }
 
 type LiveUiResult = { error?: Error };
+
+/** How a call went: what ended it and the seconds it was connected, which is what is billed. */
+type LiveCallResult = LiveUiResult & { billedSeconds: number };
 
 type LiveUiFactory = (
   tui: TUI,
@@ -172,6 +180,28 @@ function errorFrom(cause: unknown): Error {
   return cause instanceof Error ? cause : new Error(String(cause));
 }
 
+/** How much of the plan's five-hour window is used; null when the meter cannot be read. */
+function readFiveHourUsed(ctx: ExtensionContext): Promise<number | null> {
+  return requestCodexUsage(ctx, AbortSignal.timeout(USAGE_READ_MS)).then(
+    fiveHourUsedPercent,
+    () => null,
+  );
+}
+
+/** Tells the user what the call cost: the time it was connected and how far the window moved. */
+async function announceCall(
+  ctx: ExtensionContext,
+  seconds: number,
+  usedBefore: Promise<number | null>,
+): Promise<void> {
+  const usedAfter = await readFiveHourUsed(ctx);
+  try {
+    ctx.ui.notify(formatCallReadout(seconds, await usedBefore, usedAfter), "info");
+  } catch {
+    // The session the call ran in may be gone by now.
+  }
+}
+
 export function registerOpenAILive(
   pi: ExtensionAPI,
   getConfig: (ctx: ExtensionContext) => ResolvedConfig,
@@ -266,10 +296,15 @@ export function registerOpenAILive(
     cfg: ResolvedConfig,
     target: MediaTarget | undefined,
     bridged?: BridgedCall,
-  ): Promise<LiveUiResult> {
+  ): Promise<LiveCallResult> {
     // what was said, in order, across every session the call runs: saved to the chat once it ends
     const spoken = new Map<string, string>();
     let generation = 0;
+    // the seconds each session of the call was connected: together, what the plan is billed
+    const billed = new Map<number, number>();
+    const billedSeconds = () => [...billed.values()].reduce((sum, seconds) => sum + seconds, 0);
+    // read now, so that the end of the call can say how far the window moved
+    const usedBefore = readFiveHourUsed(ctx);
     const result = await showLiveUi(ctx, bridged !== undefined, (tui, theme, done) => {
       let completed = false;
       let disposed = false;
@@ -279,7 +314,8 @@ export function registerOpenAILive(
       let tickInterval: NodeJS.Timeout | undefined;
       let focusDebounce: NodeJS.Timeout | undefined;
       let disposeFocus: (() => void) | undefined;
-      let lastPhase: LivePhase | undefined;
+      // what the call's mute is: no phase says so while it is parked
+      let muted = false;
 
       const finishUi = (value: LiveUiResult) => {
         if (completed) return;
@@ -292,6 +328,7 @@ export function registerOpenAILive(
         requestRender: () => tui.requestRender(),
         onStop: () => finishUi({}),
         onToggleMute: () => session?.toggleMute(),
+        onResume: () => session?.resume(),
         ...(bridged ? { source: "phone", keys: false } : {}),
       });
       visualizer.setPhase(bridged ? "connecting" : "standby");
@@ -318,7 +355,12 @@ export function registerOpenAILive(
         const said = generation;
         const created = createSession({
           sessionId: ctx.sessionManager.getSessionId(),
-          chat: recentChat(ctx.sessionManager.getBranch()),
+          // asked again for each session the call opens, so one after a park hears the meanwhile
+          chat: () => recentChat(ctx.sessionManager.getBranch()),
+          idleHangupSeconds: cfg.live.idleHangupSeconds,
+          parkAfterSeconds: cfg.live.parkAfterSeconds,
+          // a computer's own media closes and opens again; a phone parks only if it said it can
+          ...(bridged ? { canPark: () => bridged.connection.features.has("park") } : {}),
           voice: cfg.live.voice,
           getCredentials: (signal) => getCodexCredentials(ctx, signal),
           resolveMedia: bridgedMedia
@@ -341,9 +383,20 @@ export function registerOpenAILive(
           },
           callbacks: {
             onPhase: (phase) => {
-              lastPhase = phase;
+              if (phase === "muted") muted = true;
+              else if (phase === "listening" || phase === "speaking" || phase === "working") {
+                muted = false;
+              }
               visualizer.setPhase(phase);
               bridged?.connection.send({ type: "phase", phase });
+            },
+            onUsage: (seconds) => {
+              billed.set(said, seconds);
+              const total = billedSeconds();
+              visualizer.setConnectedSeconds(total);
+              if (bridged?.connection.features.has("usage")) {
+                bridged.connection.send({ type: "usage", seconds: total });
+              }
             },
             onLevels: (input) => visualizer.setInputLevel(input),
             onTranscript: (transcript: LiveTranscript | undefined) => {
@@ -398,8 +451,10 @@ export function registerOpenAILive(
         bridged.connection.onClose(() => finishUi({}));
         bridged.takeControl((frame) => {
           if (frame.type === "stop") finishUi({});
-          else if (frame.type === "set-muted" && (lastPhase === "muted") !== frame.muted) {
-            session?.toggleMute();
+          else if (frame.type === "resume") session?.resume();
+          else if (frame.type === "set-muted" && session && muted !== frame.muted) {
+            muted = frame.muted;
+            session.toggleMute();
           }
         });
         activateSession();
@@ -483,7 +538,10 @@ export function registerOpenAILive(
       );
     }
     if (result.error) ctx.ui.notify(sanitizeDiagnosticError(result.error.message), "error");
-    return result;
+    const connected = billedSeconds();
+    // not awaited: the meter may be slow, and the next call does not wait on a readout
+    if (connected > 0) void announceCall(ctx, connected, usedBefore);
+    return { ...result, billedSeconds: connected };
   }
 
   const isBusy = () => activeRun !== undefined || settling !== undefined || choosing || bridging;
@@ -516,6 +574,10 @@ export function registerOpenAILive(
       owned = true;
       const result = await runUi(ctx, cfg, undefined, { connection, takeControl });
       if (result.error) ended = { error: result.error.message };
+      // the final count, which the last server update may not have reached
+      if (connection.features.has("usage")) {
+        connection.send({ type: "usage", seconds: result.billedSeconds });
+      }
     } catch (cause) {
       ended = { error: errorFrom(cause).message };
     } finally {

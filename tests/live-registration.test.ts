@@ -620,7 +620,7 @@ describe("what a call costs", () => {
     requireCallbacks(arbiter).onActivated("focus");
     await vi.waitFor(() => expect(sessions[0]?.start).toHaveBeenCalled());
     const end = () => {
-      captured.component!.handleInput("\u001b");
+      captured.component!.handleInput!("\u001b");
       return run;
     };
     return { sessions, captured, notify, end };
@@ -685,12 +685,12 @@ describe("what a call costs", () => {
     const { sessions, captured, end } = await localCall((options) =>
       options.callbacks.onPhase("working"),
     );
-    captured.component!.handleInput("r");
+    captured.component!.handleInput!("r");
     expect(sessions[0]!.resume).not.toHaveBeenCalled();
 
     sessions[0]!.options.callbacks.onPhase("parked");
     expect(captured.component!.render(80).join("\n")).toContain("r resume");
-    captured.component!.handleInput("r");
+    captured.component!.handleInput!("r");
     expect(sessions[0]!.resume).toHaveBeenCalledOnce();
     await end();
   });
