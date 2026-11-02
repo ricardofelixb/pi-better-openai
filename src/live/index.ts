@@ -182,10 +182,9 @@ function errorFrom(cause: unknown): Error {
 
 /** How much of the plan's five-hour window is used; null when the meter cannot be read. */
 function readFiveHourUsed(ctx: ExtensionContext): Promise<number | null> {
-  return requestCodexUsage(ctx, AbortSignal.timeout(USAGE_READ_MS)).then(
-    fiveHourUsedPercent,
-    () => null,
-  );
+  return requestCodexUsage(ctx, AbortSignal.timeout(USAGE_READ_MS))
+    .then(fiveHourUsedPercent)
+    .catch(() => null);
 }
 
 /** Tells the user what the call cost: the time it was connected and how far the window moved. */
