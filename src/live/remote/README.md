@@ -224,6 +224,37 @@ Manual acceptance (phone on Android Chrome, Pi pane in Herdr, Ovis behind HTTPS)
 - [ ] Airplane mode mid-call frees Pi within about 20 s; a second tab gets "already on" meanwhile.
 - [ ] `/live` without Ovis still works with a local device or `live.audioHost`.
 
+### The phone endpoint
+
+A phone can also reach this Pi without Ovis, through another extension in the same process, such as a gateway that authenticates it. `phone/endpoint.ts` runs the call that Ovis's relay runs, in-process: each call opens a duplex pair (`stream.duplexPair()`), one end goes into the same connection handler the unix socket uses (so `ready`, `start`, the busy refusal and the media proxy behave exactly as above, with no socket file and no `HERDR_PANE_ID`), and the other end is the relay's. The relay (`phone/relay.ts`) is `PiVoiceRelay` and `PiVoiceHub` from Ovis (`server/pi-voice.ts`) ported to Node with the Pi side injected, so Ovis can pass a unix-socket dial to the same function and switch to `phone/protocol.ts` (its `shared/pi-voice.ts`) later without touching its phone app.
+
+**Finding it.** The endpoint is emitted on `pi.events` as `pi-better-openai:live-phone` (`LIVE_PHONE_EVENT`) at load and at every `session_start`, always the same object, so load order does not matter. Another package cannot import it (a git package installs apart from this one and would load a second copy with no call running), so it keeps a structural copy of the types it uses and checks `version`:
+
+```ts
+let endpoint: LivePhoneEndpoint | undefined;
+pi.events.on("pi-better-openai:live-phone", (value) => {
+  if (isLivePhoneEndpoint(value)) endpoint = value; // your own copy of the version 1 check
+});
+```
+
+**The API** (`LivePhoneEndpoint`, version 1):
+
+- `status()` gives `{ available, busy }`: `available` while a TUI session runs with `live.enabled`, `busy` while a call is on. A caller that finds it unavailable should refuse the request itself, for example with HTTP 503; a call accepted anyway ends with `unavailable`.
+- `upgrade(request, socket, head, options?)` takes an HTTP upgrade request the caller already authenticated, completes the WebSocket handshake with this package's `ws` (frames up to 1 MiB, no compression), runs one call on it and resolves with the call once the socket is open. A refused handshake rejects with the socket destroyed.
+- `accept(peer, options?)` runs one call on a socket the caller holds, such as Bun's. The peer is `{ send(text), close(), ping() }`, and the caller reports `message(data)`, `pong()` and `closed()` into the returned call.
+- The call has `ended`, `send(frame)` (a host frame; false once the call is over) and `end()`, which tells the phone `ended {code: "closed"}`, for example when its device is revoked.
+- Options: `voice` for this call, `hostFrames`, `onHostFrame` and `onEnd({ code?, error? })`, called once however the call ends. `hostFrames` names frame types the host handles itself (step 3's `tool-call` and `tool-result`): the phone's frames of those types go to `onHostFrame`, checked only for the version, the type, the size and being an object, and `call.send` sends them back. Naming a type a call already uses throws.
+
+**The wire format** is Ovis's phone protocol (`phone/protocol.ts`): one WebSocket per call, each text message one JSON object with `"v": 1`, at most 1 MiB. An unknown type or field, a bad value, a binary message or another version ends the call, quietly.
+
+| Direction        | Frames                                                                                                                                                                                                                                              |
+| ---------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| phone to Pi      | `hello`, `response {id, ok: true, sdp?}`, `response {id, ok: false, error}`, `event {payload}`, `levels {input, output}`, `failure {message}`, `stop`, `set-muted {muted}`                                                                          |
+| Pi to phone      | `request {id, method}` (`open`, `createOffer`, `acceptAnswer {sdp}`, `waitForOpen {timeoutMs?}`), `activate`, `mute {muted}`, `ping`, `close`, `phase {phase}`, `transcript {role, text, turn, final}`, `transcript-clear`, `ended {error?, code?}` |
+| relay to Pi only | `start {voice?}`, which the phone cannot send                                                                                                                                                                                                       |
+
+The phone sends `hello` at once; the relay holds up to 16 frames while it reaches Pi and waits up to 2 s for `ready`. `ready.busy` ends the call with `ended {code: "busy"}`, a missing or wrong `ready` with `unavailable`, and a second `ready` or a frame Pi may not send with `closed`. Then it sends `start`, flushes what it held and relays both ways, checking and re-serializing every frame. It pings the WebSocket every 5 s and ends the call 20 s after the last pong or message, which is what catches a phone that went silent (the bridge has no lease of its own). `not_pi` is also a valid code, but it is Ovis's, for a pane that runs no Pi: this endpoint never sends it. No frame is ever logged; an SDP carries addresses.
+
 ## Pieces
 
 - `route.ts`: the `ssh` command line (host validation) and the media factory a session uses.
@@ -237,5 +268,6 @@ Manual acceptance (phone on Android Chrome, Pi pane in Herdr, Ovis behind HTTPS)
   `.ts` inside `node_modules`.
 - `tailscale.ts`: CLI lookup.
 - `../bridge/protocol.ts` / `socket.ts` / `media.ts`: the Ovis bridge's frames, the per-process socket and connection, and the connection as a media process (see above).
+- `../phone/protocol.ts` / `relay.ts` / `endpoint.ts`: the phone's frames, the relay between a phone and a Pi, and the in-process endpoint other extensions take calls through (see above).
 
 Tests use fakes and local subprocesses; none opens a device or reaches the network.

@@ -1,7 +1,7 @@
 import { chmodSync, lstatSync, mkdirSync, unlinkSync } from "node:fs";
 import net from "node:net";
 import { dirname, join } from "node:path";
-import { PassThrough } from "node:stream";
+import { type Duplex, duplexPair, PassThrough } from "node:stream";
 import { encodeFrame, FrameDecoder } from "../remote/protocol.ts";
 import {
   type BridgeControlFrame,
@@ -22,13 +22,13 @@ export function liveBridgeSocketPath(agentDir: string, pid: number = process.pid
 }
 
 /**
- * One phone's connection. Its media frames (hello, responses, events, levels, failure) come out
+ * One phone's connection, over a unix socket or any other duplex stream. Its media frames (hello, responses, events, levels, failure) come out
  * of `output` as the lines the remote media client reads; the control frames go to `onControl`,
  * so they never reach the media parser.
  */
 export class LiveBridgeConnection {
   readonly output = new PassThrough();
-  readonly #socket: net.Socket;
+  readonly #socket: Duplex;
   readonly #decoder = new FrameDecoder(parseBridgeInbound);
   readonly #closeListeners: Array<() => void> = [];
   #control: ((frame: BridgeControlFrame) => void) | undefined;
@@ -37,7 +37,7 @@ export class LiveBridgeConnection {
   #ending = false;
   #closed = false;
 
-  constructor(socket: net.Socket) {
+  constructor(socket: Duplex) {
     this.#socket = socket;
     socket.on("data", (chunk: Buffer) => this.#onData(chunk));
     socket.on("error", () => undefined);
@@ -120,13 +120,46 @@ export class LiveBridgeConnection {
   }
 }
 
-export interface LiveBridgeServerOptions {
-  agentDir: string;
+export interface BridgeConnectionOptions {
   pid?: number;
   /** The Herdr pane this Pi runs in, so the relay can check it reached the pane it meant to. */
   pane?: string | undefined;
   isBusy(): boolean;
   onConnection(connection: LiveBridgeConnection): void;
+}
+
+export interface LiveBridgeServerOptions extends BridgeConnectionOptions {
+  agentDir: string;
+}
+
+/**
+ * Takes a stream a phone's relay is on the other end of: hands the connection to `onConnection`,
+ * then says ready, so the relay knows whose Pi this is and whether a call is already on.
+ */
+export function acceptBridgeConnection(
+  stream: Duplex,
+  options: BridgeConnectionOptions,
+): LiveBridgeConnection {
+  const connection = new LiveBridgeConnection(stream);
+  options.onConnection(connection);
+  connection.send({
+    type: "ready",
+    pid: options.pid ?? process.pid,
+    ...(options.pane ? { pane: options.pane } : {}),
+    busy: options.isBusy(),
+  });
+  return connection;
+}
+
+/**
+ * The two ends of a connection inside this process, which close together as a socket's do: when
+ * one is destroyed, so is the other, and each hears it as a `close`.
+ */
+export function connectedPair(): [Duplex, Duplex] {
+  const [first, second] = duplexPair();
+  first.once("close", () => second.destroy());
+  second.once("close", () => first.destroy());
+  return [first, second];
 }
 
 /**
@@ -178,16 +211,9 @@ export class LiveBridgeServer {
   }
 
   #accept(socket: net.Socket): void {
-    const connection = new LiveBridgeConnection(socket);
+    const connection = acceptBridgeConnection(socket, this.#options);
     this.#connections.add(connection);
     connection.onClose(() => this.#connections.delete(connection));
-    this.#options.onConnection(connection);
-    connection.send({
-      type: "ready",
-      pid: this.#options.pid ?? process.pid,
-      ...(this.#options.pane ? { pane: this.#options.pane } : {}),
-      busy: this.#options.isBusy(),
-    });
   }
 }
 

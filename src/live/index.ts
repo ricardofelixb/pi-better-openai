@@ -12,7 +12,12 @@ import { sanitizeDiagnosticError } from "../format.ts";
 import { piAgentDir } from "../paths.ts";
 import { createBridgeMediaFactory } from "./bridge/media.ts";
 import type { BridgeControlFrame } from "./bridge/protocol.ts";
-import { type LiveBridgeConnection, LiveBridgeServer } from "./bridge/socket.ts";
+import {
+  acceptBridgeConnection,
+  connectedPair,
+  type LiveBridgeConnection,
+  LiveBridgeServer,
+} from "./bridge/socket.ts";
 import {
   LIVE_DELEGATION_MESSAGE_TYPE,
   LIVE_TRANSCRIPT_HEADING,
@@ -26,6 +31,7 @@ import {
   type LiveTranscript,
 } from "./controller.ts";
 import { attachFocusReporting, probeFocusReporting, type FocusTerminalHandle } from "./focus.ts";
+import { createLivePhoneEndpoint, LIVE_PHONE_EVENT } from "./phone/endpoint.ts";
 import { type LauncherOptions, registerPersonalLauncher } from "./remote/host.ts";
 import { type MediaTarget, OriginCancelled } from "./remote/origin.ts";
 import { type RouteDependencies, resolveLiveMedia, resolveLiveTarget } from "./remote/route.ts";
@@ -519,8 +525,53 @@ export function registerOpenAILive(
     }
   }
 
+  // The same handling for a phone on the unix socket (Ovis) and one on the phone endpoint.
+  function handleBridgeConnection(connection: LiveBridgeConnection): void {
+    const waiting: BridgeControlFrame[] = [];
+    let handler: ((frame: BridgeControlFrame) => void) | undefined;
+    connection.onControl((frame) => {
+      if (frame.type !== "start") {
+        if (handler) handler(frame);
+        else waiting.push(frame);
+        return;
+      }
+      if (!bridgeCtx) return connection.close();
+      const call = startBridged(
+        bridgeCtx,
+        connection,
+        (next) => {
+          handler = next;
+          for (const queued of waiting.splice(0)) next(queued);
+        },
+        frame.voice,
+      ).catch(() => undefined);
+      bridgedCalls.add(call);
+      void call.finally(() => bridgedCalls.delete(call));
+    });
+  }
+
+  const phoneEndpoint = createLivePhoneEndpoint({
+    status: () => ({
+      available:
+        bridgeCtx !== undefined && bridgeCtx.mode === "tui" && getConfig(bridgeCtx).live.enabled,
+      busy: isBusy(),
+    }),
+    openBridge() {
+      const [relay, local] = connectedPair();
+      acceptBridgeConnection(local, { isBusy, onConnection: handleBridgeConnection });
+      return relay;
+    },
+  });
+
+  // Whoever takes phone calls, such as a gateway, hears the endpoint at load or at the next
+  // session start, whichever comes after it subscribes, like pi-multiprovider's service.
+  function publishPhoneEndpoint(): void {
+    if (typeof pi.events?.emit === "function") pi.events.emit(LIVE_PHONE_EVENT, phoneEndpoint);
+  }
+
   async function attachBridge(ctx: ExtensionContext): Promise<void> {
     bridgeCtx = ctx;
+    publishPhoneEndpoint();
     if (bridge || attaching) return;
     if (process.platform === "win32" || !env.HERDR_PANE_ID || ctx.mode !== "tui") return;
     attaching = true;
@@ -530,29 +581,7 @@ export function registerOpenAILive(
         agentDir: dependencies.bridgeAgentDir ?? piAgentDir(),
         pane: env.HERDR_PANE_ID,
         isBusy,
-        onConnection: (connection) => {
-          const waiting: BridgeControlFrame[] = [];
-          let handler: ((frame: BridgeControlFrame) => void) | undefined;
-          connection.onControl((frame) => {
-            if (frame.type !== "start") {
-              if (handler) handler(frame);
-              else waiting.push(frame);
-              return;
-            }
-            if (!bridgeCtx) return connection.close();
-            const call = startBridged(
-              bridgeCtx,
-              connection,
-              (next) => {
-                handler = next;
-                for (const queued of waiting.splice(0)) next(queued);
-              },
-              frame.voice,
-            ).catch(() => undefined);
-            bridgedCalls.add(call);
-            void call.finally(() => bridgedCalls.delete(call));
-          });
-        },
+        onConnection: handleBridgeConnection,
       });
       if (await server.listen()) bridge = server;
     } catch {
@@ -622,6 +651,8 @@ export function registerOpenAILive(
     bridge = undefined;
     await closing?.close();
   });
+
+  publishPhoneEndpoint();
 
   return {
     isActive: () => activeRun !== undefined || settling !== undefined,
