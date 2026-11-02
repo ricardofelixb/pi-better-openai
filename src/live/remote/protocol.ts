@@ -15,8 +15,8 @@ export const MAX_REQUEST_TIMEOUT_MS = 120_000;
 export const LIVE_MEDIA_PING_MS = 5_000;
 export const LIVE_MEDIA_LEASE_MS = 20_000;
 const MAX_NODE_ID_LENGTH = 256;
-export const MAX_FEATURES = 8;
-export const MAX_FEATURE_LENGTH = 32;
+const MAX_FEATURES = 8;
+const MAX_FEATURE_LENGTH = 32;
 
 export type ClientFrame =
   | { type: "request"; id: number; method: "open" | "createOffer" }
