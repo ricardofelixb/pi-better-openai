@@ -11,6 +11,7 @@ import type {
   ExtensionAPI,
   ExtensionContext,
   ExtensionToolContext,
+  RegisteredCommand,
   ToolDefinition,
 } from "@earendil-works/pi-coding-agent";
 import { afterEach, describe, expect, test, vi } from "vitest";
@@ -267,16 +268,16 @@ describe("native typed decisions", () => {
     writeConfig(path, { unknown: true, decisions: { enabled: false, unknown: "keep" } });
     const { ctx, classify } = harness();
     const tools = new Map<string, ToolDefinition>();
-    const commands = new Map<
-      string,
-      { handler: (args: string, ctx: ExtensionContext) => Promise<void> }
-    >();
+    type Command = {
+      handler: (args: string, ctx: ExtensionContext) => Promise<void>;
+      getArgumentCompletions?: RegisteredCommand["getArgumentCompletions"];
+    };
+    const commands = new Map<string, Command>();
+    const on = vi.fn();
     const pi = {
+      on,
       registerTool: (tool: ToolDefinition) => tools.set(tool.name, tool),
-      registerCommand: (
-        name: string,
-        cmd: { handler: (args: string, ctx: ExtensionContext) => Promise<void> },
-      ) => commands.set(name, cmd),
+      registerCommand: (name: string, cmd: Command) => commands.set(name, cmd),
     } as unknown as ExtensionAPI;
     registerOpenAIDecisions(
       pi,
@@ -284,6 +285,18 @@ describe("native typed decisions", () => {
       () => resolveConfig(dir),
     );
     const command = commands.get("openai-decisions")!;
+    const complete = command.getArgumentCompletions!;
+    expect(await complete("use ")).toBeNull();
+    const start = on.mock.calls.find(([event]) => event === "session_start")![1];
+    start({}, ctx);
+    expect(await complete("use ")).toEqual([
+      expect.objectContaining({ value: "use typesafe/jev-latest" }),
+    ]);
+    expect(ctx.modelRegistry.getModelsOfType).toHaveBeenCalledWith("classifier");
+    vi.mocked(ctx.modelRegistry.getModelsOfType).mockReturnValueOnce([]);
+    expect(await complete("use ")).toBeNull();
+    expect(readRawConfig(path).decisions).toMatchObject({ enabled: false });
+    expect(classify).not.toHaveBeenCalled();
     expect(tools.get("openai_decide")!.exposure).toBe("hidden");
     await command.handler("models", ctx);
     expect(classify).not.toHaveBeenCalled();

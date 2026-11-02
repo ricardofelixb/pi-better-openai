@@ -33,14 +33,39 @@ test("loads through pi's real extension loader and registers the native Codex pr
       "openai_decide",
     ]);
     expect([...loaded.extensions[0]!.commands.keys()]).toEqual(
-      expect.arrayContaining(["fast", "openai-tier", "openai-decisions"]),
+      expect.arrayContaining(["openai-tier", "openai-decisions"]),
     );
     expect(
       loaded.runtime.pendingNativeProviderRegistrations.map(({ provider }) => provider.id),
-    ).toEqual(["openai-codex"]);
+    ).toEqual(["openai-codex", "openai", "openai-decisions"]);
+    const registeredOpenAI = loaded.runtime.pendingNativeProviderRegistrations.find(
+      ({ provider }) => provider.id === "openai",
+    )!.provider;
+    expect(registeredOpenAI.getModels()).toContainEqual(
+      expect.objectContaining({ id: "gpt-6.1-terra", api: "openai-responses" }),
+    );
+    // The loader has its own module cache; function identity is tested in openai-models.test.ts.
+    expect(registeredOpenAI.streamSimple).toEqual(expect.any(Function));
+    expect(registeredOpenAI.auth?.oauth?.isSubscription).toBe(true);
+    expect(loaded.extensions[0]!.commands.has("fast")).toBe(false);
+    expect(loaded.extensions[0]!.flags.has("fast")).toBe(false);
     const provider = builtinProviders().find((provider) => provider.id === "openai")!;
     expect(provider.getAllModels?.()).toEqual(
       expect.arrayContaining([
+        expect.objectContaining({
+          type: "chat",
+          provider: "openai",
+          id: "gpt-6-astra",
+          api: "openai-responses",
+          baseUrl: "https://api.openai.com/v1",
+        }),
+        expect.objectContaining({
+          type: "chat",
+          provider: "openai",
+          id: "gpt-6.1-sol",
+          api: "openai-responses",
+          baseUrl: "https://api.openai.com/v1",
+        }),
         expect.objectContaining({ type: "classifier", id: "gpt-6-luna", api: "openai-decisions" }),
       ]),
     );

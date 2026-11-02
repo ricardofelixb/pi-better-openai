@@ -46,10 +46,12 @@ export const DEFAULT_SUPPORTED_MODELS = [
   "openai/gpt-5.5",
   "openai/gpt-6-astra",
   "openai/gpt-6.1-sol",
+  "openai/gpt-6.1-terra",
   "openai/gpt-6-sol",
   "openai/gpt-6-luna",
   "openai-codex/gpt-6-astra",
   "openai-codex/gpt-6.1-sol",
+  "openai-codex/gpt-6.1-terra",
   "openai-codex/gpt-6-sol",
   "openai-codex/gpt-6-luna",
   "openai-codex/gpt-5.6-sol",
@@ -63,6 +65,23 @@ export const DEFAULT_SUPPORTED_MODELS = [
 // default list. Treat those exact snapshots as unset so later additions to
 // DEFAULT_SUPPORTED_MODELS (such as gpt-6-astra) reach existing installs.
 const LEGACY_SEEDED_SUPPORTED_MODELS: readonly (readonly string[])[] = [
+  [
+    "openai/gpt-5.4",
+    "openai/gpt-5.5",
+    "openai/gpt-6-astra",
+    "openai/gpt-6.1-sol",
+    "openai/gpt-6-sol",
+    "openai/gpt-6-luna",
+    "openai-codex/gpt-6-astra",
+    "openai-codex/gpt-6.1-sol",
+    "openai-codex/gpt-6-sol",
+    "openai-codex/gpt-6-luna",
+    "openai-codex/gpt-5.6-sol",
+    "openai-codex/gpt-5.6-terra",
+    "openai-codex/gpt-5.6-luna",
+    "openai-codex/gpt-5.4",
+    "openai-codex/gpt-5.5",
+  ],
   [
     "openai/gpt-5.4",
     "openai/gpt-5.5",
@@ -315,7 +334,7 @@ export const FAST_SETTING_DESCRIPTORS: readonly SettingsOptionDescriptor[] = [
     currentValue: (cfg) => cfg.serviceTier ?? (cfg.desiredActive ? "fast" : "standard"),
     values: SERVICE_TIERS,
     description:
-      "Ultrafast explicitly opts into 6x Standard token prices for API Astra (global/US only). Codex subscription access is not verified. Host cost estimates may exclude tier premiums.",
+      "Request Ultrafast for OpenAI Astra/Sol with API keys or subscription OAuth. API usage costs 6x Standard; legacy Codex stays unsupported.",
     parse: stringSetting,
   },
   {
@@ -691,7 +710,7 @@ export const DECISIONS_SETTING_DESCRIPTORS: readonly SettingsOptionDescriptor[] 
     currentValue: (cfg) => cfg.decisions.model,
     parse: stringSetting,
     description:
-      "Select with /openai-decisions use provider/model. OpenAI Decisions: openai/gpt-6-luna (API key only). Jev is also supported.",
+      "Select with /openai-decisions use provider/model. OpenAI Decisions: openai-decisions/gpt-6-luna (separate API key; keeps chat OAuth). Jev is also supported.",
   },
   {
     id: "decisions.timeoutMs",
