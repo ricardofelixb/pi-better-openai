@@ -223,6 +223,34 @@ describe("host identity and lease frames", () => {
     }
   });
 
+  test("hello may name the features the media host has, up to eight of up to 32 characters", () => {
+    const hello = { type: "hello" as const, features: ["park", "usage"] };
+    expect(new FrameDecoder(parseHostFrame).push(encodeFrame(hello))).toEqual([hello]);
+    const eight = Array.from({ length: 8 }, (_, index) => `feature-${index}`);
+    expect(parseHostFrame(line({ v: 1, type: "hello", features: eight }))).toMatchObject({
+      features: eight,
+    });
+    expect(parseHostFrame(line({ v: 1, type: "hello", features: ["x".repeat(32)] }))).toBeTruthy();
+    for (const bad of [
+      { features: "park" },
+      { features: [7] },
+      { features: [["park"]] },
+      { features: ["x".repeat(33)] },
+      { features: [...eight, "ninth"] },
+    ]) {
+      expect(() => parseHostFrame(line({ v: 1, type: "hello", ...bad })), line(bad)).toThrow(
+        ProtocolError,
+      );
+    }
+  });
+
+  test("park is a bare client frame", () => {
+    expect(new FrameDecoder(parseClientFrame).push(encodeFrame({ type: "park" }))).toEqual([
+      { type: "park" },
+    ]);
+    expect(() => parseClientFrame(line({ v: 1, type: "park", extra: 1 }))).toThrow(ProtocolError);
+  });
+
   test("ping is a bare client frame", () => {
     expect(new FrameDecoder(parseClientFrame).push(encodeFrame({ type: "ping" }))).toEqual([
       { type: "ping" },

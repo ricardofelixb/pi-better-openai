@@ -65,6 +65,18 @@ describe("live server events", () => {
     });
   });
 
+  test("parses the server's report of how long the call has been billed", () => {
+    expect(
+      parseLiveServerEvent(
+        '{"type":"session.usage.updated","usage":{"audio_duration_ms":13400,"backend_model_usage":[]},"usage_limit":{"status":null,"reset_seconds":null}}',
+      ),
+    ).toEqual({ type: "session.usage.updated", usage: { audio_duration_ms: 13400 } });
+    expect(
+      parseLiveServerEvent({ type: "session.usage.updated", usage: { audio_duration_ms: -1 } }),
+    ).toBeNull();
+    expect(parseLiveServerEvent({ type: "session.usage.updated", usage: {} })).toBeNull();
+  });
+
   test("classifies unknown events and rejects malformed known events", () => {
     expect(parseLiveServerEvent({ type: "rate_limits.updated", remaining: 3 })).toEqual({
       type: "unknown",

@@ -60,13 +60,36 @@ export function createRemoteMediaFactory(
 }
 
 /**
+ * Media that outlives its sessions, for a host that can park: the first session starts the
+ * process and opens the devices, and once that session has parked the next one takes the same
+ * process over, without opening again. A session's signal does not close it; closing does.
+ */
+export function createParkableMediaFactory(
+  spawn: () => RemoteMediaProcess,
+  timeouts: RemoteMediaOptions = {},
+): LiveMediaFactory {
+  let media: RemoteLiveMedia | undefined;
+  return (callbacks) => {
+    if (!media) return (media = new RemoteLiveMedia(spawn(), callbacks, timeouts, undefined, true));
+    media.resume(callbacks);
+    return media;
+  };
+}
+
+const NO_CALLBACKS: LiveMediaCallbacks = {
+  onEvent: () => undefined,
+  onLevels: () => undefined,
+  onFailure: () => undefined,
+};
+
+/**
  * Media that lives in a process on another computer. The process starts on construction, its
  * hello is version-checked before it is asked to open any device, and every failure, exit or
  * abort ends in one failure report and a stopped process.
  */
 class RemoteLiveMedia implements LiveMedia {
   readonly #process: RemoteMediaProcess;
-  readonly #callbacks: LiveMediaCallbacks;
+  #callbacks: LiveMediaCallbacks;
   readonly #handshakeMs: number;
   readonly #requestMs: number;
   readonly #closeMs: number;
@@ -81,6 +104,8 @@ class RemoteLiveMedia implements LiveMedia {
   #helloSeen = false;
   #nextId = 1;
   #closed = false;
+  readonly #parkable: boolean;
+  #parked = false;
   #exitedAlready = false;
   #reported = false;
   #failure = new Error("Live media is closed.");
@@ -93,8 +118,10 @@ class RemoteLiveMedia implements LiveMedia {
     callbacks: LiveMediaCallbacks,
     timeouts: RemoteMediaOptions,
     signal?: AbortSignal,
+    parkable = false,
   ) {
     this.#process = child;
+    this.#parkable = parkable;
     this.#callbacks = callbacks;
     this.#handshakeMs = timeouts.handshakeMs ?? DEFAULT_HANDSHAKE_TIMEOUT_MS;
     this.#requestMs = timeouts.requestMs ?? DEFAULT_REQUEST_TIMEOUT_MS;
@@ -192,6 +219,27 @@ class RemoteLiveMedia implements LiveMedia {
 
   setMuted(muted: boolean): void {
     this.#notify({ type: "mute", muted });
+  }
+
+  /**
+   * Has the host drop its peer connection and levels while keeping its microphone and the
+   * connection to Pi. Nothing it says meanwhile reaches a session, and a failure ends the media.
+   * A host that cannot park (the companion ignores the frame) is closed, for the next to replace.
+   */
+  async park(): Promise<void> {
+    if (!this.#parkable) return this.close();
+    if (this.#closed || this.#parked) return;
+    this.#parked = true;
+    this.#callbacks = NO_CALLBACKS;
+    this.#write({ type: "park" });
+  }
+
+  /** Hands a parked media to the next session, which negotiates a peer connection afresh. */
+  resume(callbacks: LiveMediaCallbacks): void {
+    if (this.#closed) throw this.#failure;
+    if (!this.#parked) throw new Error("The phone connection carries one call.");
+    this.#parked = false;
+    this.#callbacks = callbacks;
   }
 
   /** Resolves once the process has exited; rejects if it could not be made to. */
@@ -299,7 +347,9 @@ class RemoteLiveMedia implements LiveMedia {
         this.#isolated(() => this.#callbacks.onLevels(frame.input, frame.output));
         break;
       case "failure":
-        this.#report(frame.message);
+        // nothing is listening while parked, and the devices are gone: the next resume says so
+        if (this.#parked) this.#fail(frame.message);
+        else this.#report(frame.message);
         break;
     }
   }

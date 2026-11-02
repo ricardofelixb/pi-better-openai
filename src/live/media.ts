@@ -26,6 +26,12 @@ export interface LiveMedia {
   activate(): void;
   setMuted(muted: boolean): void;
   close(): Promise<void>;
+  /**
+   * Gives up the peer connection but keeps the devices, for a later session to take over. Absent
+   * when the media cannot wait, in which case the session closes it and the next opens its own;
+   * media that is present but cannot wait closes itself.
+   */
+  park?(): Promise<void>;
 }
 
 export type LiveMediaFactory = (callbacks: LiveMediaCallbacks, signal?: AbortSignal) => LiveMedia;

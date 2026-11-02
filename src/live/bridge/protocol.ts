@@ -38,7 +38,9 @@ export const MAX_ENDED_ERROR_LENGTH = 2_048;
 export type BridgeControlFrame =
   | { type: "start"; voice?: LiveVoice }
   | { type: "stop" }
-  | { type: "set-muted"; muted: boolean };
+  | { type: "set-muted"; muted: boolean }
+  /** From a phone that parks: connect a session now, rather than when the work is done. */
+  | { type: "resume" };
 
 export type BridgeInboundFrame = BridgeControlFrame | HostFrame;
 
@@ -46,6 +48,8 @@ export type BridgeInboundFrame = BridgeControlFrame | HostFrame;
 export type BridgeCallFrame =
   | { type: "ready"; pid: number; pane?: string; busy: boolean }
   | { type: "phase"; phase: LivePhase }
+  /** Only to a phone that said "usage": the seconds this call has been billed. */
+  | { type: "usage"; seconds: number }
   | {
       type: "transcript";
       role: "user" | "assistant";
@@ -62,6 +66,7 @@ const CONTROL_SHAPES = new Map<string, Shape>([
   ["start", { optional: { voice: isLiveVoice } }],
   ["stop", {}],
   ["set-muted", { required: { muted: isBoolean } }],
+  ["resume", {}],
 ]);
 
 export function isBridgeControl(frame: BridgeInboundFrame): frame is BridgeControlFrame {
@@ -89,6 +94,7 @@ export function encodeBridgeFrame(frame: BridgeOutboundFrame): string {
       );
     case "ready":
     case "phase":
+    case "usage":
     case "transcript-clear":
       return encodeCallFrame(frame);
     default:

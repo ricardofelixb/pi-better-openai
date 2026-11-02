@@ -17,6 +17,9 @@ const frame = (body: Record<string, unknown>, v = 1) => JSON.stringify({ v, ...b
 
 const PHONE_FRAMES: Array<Record<string, unknown>> = [
   { type: "hello" },
+  { type: "hello", features: [] },
+  { type: "hello", features: ["park", "usage", "something-new"] },
+  { type: "resume" },
   { type: "response", id: 3, ok: true },
   { type: "response", id: 3, ok: true, sdp: "v=0" },
   { type: "response", id: 4, ok: false, error: "no" },
@@ -39,7 +42,11 @@ const PI_FRAMES: Array<Record<string, unknown>> = [
   { type: "mute", muted: false },
   { type: "ping" },
   { type: "close" },
+  { type: "park" },
   { type: "phase", phase: "listening" },
+  { type: "phase", phase: "parked" },
+  { type: "usage", seconds: 0 },
+  { type: "usage", seconds: 192 },
   { type: "transcript", role: "assistant", text: "Hi.", turn: 2, final: false },
   { type: "transcript", role: "user", text: "", turn: 0, final: true },
   { type: "transcript-clear" },
@@ -71,6 +78,11 @@ describe("parsePhoneFrame", () => {
     for (const bad of [
       frame({ type: "tool-call", id: 1 }),
       frame({ type: "hello", extra: 1 }),
+      frame({ type: "hello", features: "park" }),
+      frame({ type: "hello", features: [1] }),
+      frame({ type: "hello", features: ["x".repeat(33)] }),
+      frame({ type: "hello", features: Array.from({ length: 9 }, (_, index) => `f${index}`) }),
+      frame({ type: "resume", extra: 1 }),
       frame({ type: "stop", extra: true }),
       frame({ type: "levels", input: 1.5, output: 0 }),
       frame({ type: "levels", input: 0 }),
@@ -132,6 +144,12 @@ describe("parsePiLine", () => {
 
   test("refuses bad shapes", () => {
     for (const bad of [
+      frame({ type: "usage" }),
+      frame({ type: "usage", seconds: -1 }),
+      frame({ type: "usage", seconds: 1.5 }),
+      frame({ type: "usage", seconds: "9" }),
+      frame({ type: "park", extra: 1 }),
+      frame({ type: "phase", phase: "asleep" }),
       frame({ type: "ready", pid: 42 }),
       frame({ type: "ready", pid: 0, busy: false }),
       frame({ type: "ready", pid: 1.5, busy: false }),

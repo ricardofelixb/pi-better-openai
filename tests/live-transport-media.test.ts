@@ -196,6 +196,25 @@ describe("CodexLiveTransport media seam", () => {
     expect(callbacks.onEvent).not.toHaveBeenCalled();
   });
 
+  test("parks media that can wait, and closes media that cannot", async () => {
+    const waiting = fakeMedia();
+    waiting.media.park = vi.fn(async () => void waiting.calls.push(["park"]));
+    const parked = makeTransport(waiting);
+    await parked.transport.connect();
+    await parked.transport.park();
+    expect(waiting.media.park).toHaveBeenCalledOnce();
+    expect(waiting.media.close).not.toHaveBeenCalled();
+    // closing the same transport afterwards does not close the devices it left running
+    await parked.transport.close();
+    expect(waiting.media.close).not.toHaveBeenCalled();
+
+    const fixed = fakeMedia();
+    const closed = makeTransport(fixed);
+    await closed.transport.connect();
+    await closed.transport.park();
+    expect(fixed.media.close).toHaveBeenCalledOnce();
+  });
+
   test("closes the media and rethrows the original cause when signaling fails", async () => {
     const media = fakeMedia();
     const { transport } = makeTransport(media);

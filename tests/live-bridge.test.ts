@@ -16,6 +16,11 @@ import { registerOpenAILive } from "../src/live/index.ts";
 import type { ResolvedConfig } from "../src/config.ts";
 import { makeResolvedConfig } from "./helpers.ts";
 
+vi.mock("../src/usage.ts", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../src/usage.ts")>()),
+  requestCodexUsage: vi.fn(async () => undefined),
+}));
+
 type Frame = Record<string, unknown> & { type: string };
 
 const theme = {
@@ -144,6 +149,7 @@ function makeSession(options: LiveSessionControllerOptions) {
       muted = !muted;
       options.callbacks.onPhase(muted ? "muted" : "listening");
     }),
+    resume: vi.fn(),
     handleAgentMessage: vi.fn(),
     handleAgentSettled: vi.fn(),
   };
@@ -353,10 +359,10 @@ describe("a call started from the socket", () => {
     expect(sessions[0]!.toggleMute).toHaveBeenCalledOnce();
   });
 
-  async function startCall() {
+  async function startCall(features?: string[]) {
     const harness = await setup();
     const { host } = await open();
-    host.send({ type: "hello" });
+    host.send(features ? { type: "hello", features } : { type: "hello" });
     host.send({ type: "start" });
     const request = await host.next("request");
     host.send({ type: "response", id: request.id, ok: true });
@@ -411,6 +417,68 @@ describe("a call started from the socket", () => {
     host.send({ type: "set-muted", muted: true });
     await host.next("phase");
     host.send({ type: "set-muted", muted: true });
+    host.send({ type: "set-muted", muted: false });
+    await vi.waitFor(() => expect(sessions[0]!.toggleMute).toHaveBeenCalledTimes(2));
+  });
+
+  test("tells a phone that asked how long the call has been billed, and once more before it ends", async () => {
+    const { host, sessions } = await startCall(["usage"]);
+    sessions[0]!.options.callbacks.onUsage?.(15);
+    expect(await host.next("usage")).toEqual({ v: 1, type: "usage", seconds: 15 });
+    sessions[0]!.options.callbacks.onUsage?.(30);
+    expect(await host.next("usage")).toMatchObject({ seconds: 30 });
+
+    // the session closing adds its last seconds, which the phone hears before the end
+    sessions[0]!.stop.mockImplementationOnce(async () =>
+      sessions[0]!.options.callbacks.onUsage?.(41),
+    );
+    host.send({ type: "stop" });
+    expect(await host.next("usage")).toMatchObject({ seconds: 41 });
+    await host.next("ended");
+    const types = host.seen.map((frame) => frame.type);
+    expect(types.lastIndexOf("usage")).toBeLessThan(types.indexOf("ended"));
+    expect(host.seen.filter((frame) => frame.type === "usage").at(-1)).toMatchObject({
+      seconds: 41,
+    });
+  });
+
+  test("never sends usage to a phone that did not say it understands it", async () => {
+    const { host, sessions } = await startCall(["park", "something-new"]);
+    sessions[0]!.options.callbacks.onUsage?.(15);
+    host.send({ type: "stop" });
+    await host.next("ended");
+    expect(host.seen.some((frame) => frame.type === "usage")).toBe(false);
+  });
+
+  test("lets a call park only when the phone said it can, and relays the phase", async () => {
+    const parking = await startCall(["park"]);
+    expect(parking.sessions[0]!.options.canPark?.()).toBe(true);
+    parking.sessions[0]!.options.callbacks.onPhase("parked");
+    expect(await parking.host.next("phase")).toMatchObject({ phase: "parked" });
+
+    const fixed = await startCall();
+    expect(fixed.sessions[0]!.options.canPark?.()).toBe(false);
+  });
+
+  test("a resume frame brings a parked call back, and does not reach the media", async () => {
+    const { host, sessions } = await startCall(["park"]);
+    host.send({ type: "resume" });
+    await vi.waitFor(() => expect(sessions[0]!.resume).toHaveBeenCalledOnce());
+    host.send({ type: "stop" });
+    await host.next("ended");
+  });
+
+  test("keeps track of the phone's mute while the call is parked", async () => {
+    const { host, sessions } = await startCall(["park"]);
+    sessions[0]!.options.callbacks.onPhase("parked");
+    // a parked controller remembers the mute for its next session and says nothing of it
+    sessions[0]!.toggleMute.mockImplementation(() => undefined);
+    host.send({ type: "set-muted", muted: true });
+    await vi.waitFor(() => expect(sessions[0]!.toggleMute).toHaveBeenCalledTimes(1));
+    // no phase says the call is muted while it is parked, so the same ask must not toggle twice
+    host.send({ type: "set-muted", muted: true });
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    expect(sessions[0]!.toggleMute).toHaveBeenCalledTimes(1);
     host.send({ type: "set-muted", muted: false });
     await vi.waitFor(() => expect(sessions[0]!.toggleMute).toHaveBeenCalledTimes(2));
   });

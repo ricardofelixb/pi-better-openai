@@ -48,7 +48,13 @@ describe("config helpers", () => {
     expect(_test.DEFAULT_CONFIG.usage?.autoRedeemBankedResets).toBe(true);
     expect(_test.DEFAULT_IMAGE_CONFIG.defaultModel).toBe("gpt-image-2.5");
     expect(_test.DEFAULT_IMAGE_CONFIG.defaultSave).toBe("project");
-    expect(_test.DEFAULT_LIVE_CONFIG).toEqual({ enabled: true, voice: "sol", audioHost: "" });
+    expect(_test.DEFAULT_LIVE_CONFIG).toEqual({
+      enabled: true,
+      voice: "sol",
+      audioHost: "",
+      idleHangupSeconds: 120,
+      parkAfterSeconds: 20,
+    });
     expect(_test.DEFAULT_PET_CONFIG.placement).toBe("inline-right");
     expect(_test.DEFAULT_PET_CONFIG.state).toBe("idle");
     expect(_test.DEFAULT_PET_CONFIG.thinkingState).toBe("review");
@@ -329,7 +335,12 @@ describe("config helpers", () => {
           },
           footer: { mode: "replace" },
           image: { defaultSave: "global", outputFormat: "jpeg", timeoutMs: 40000 },
-          live: { enabled: false, voice: "spruce", audioHost: "me@audio-pc" },
+          live: {
+            enabled: false,
+            voice: "spruce",
+            audioHost: "me@audio-pc",
+            idleHangupSeconds: 300,
+          },
           pets: {
             placement: "badge",
             idleEmotes: false,
@@ -359,7 +370,13 @@ describe("config helpers", () => {
           outputFormat: "webp",
           timeoutMs: 40000,
         });
-        expect(resolved.live).toEqual({ enabled: true, voice: "spruce", audioHost: "me@audio-pc" });
+        expect(resolved.live).toEqual({
+          enabled: true,
+          voice: "spruce",
+          audioHost: "me@audio-pc",
+          idleHangupSeconds: 300,
+          parkAfterSeconds: 20,
+        });
         expect(resolved.pets).toMatchObject({
           placement: "badge",
           idleEmotes: false,
@@ -370,13 +387,28 @@ describe("config helpers", () => {
     });
   });
 
+  test("reads the live call's quiet limits, whole seconds from 0 up", () => {
+    withTempDir((tempDir) => {
+      const configPath = join(tempDir, "config.json");
+      writeConfig(configPath, { live: { idleHangupSeconds: 0, parkAfterSeconds: 45.9 } });
+
+      expect(readConfig(configPath)?.live).toEqual({ idleHangupSeconds: 0, parkAfterSeconds: 45 });
+    });
+  });
+
   test("ignores invalid enum values while reading config", () => {
     withTempDir((tempDir) => {
       const configPath = join(tempDir, "config.json");
       writeConfig(configPath, {
         footer: { mode: "float" },
         image: { enabled: true, defaultSave: "desktop", outputFormat: "gif" },
-        live: { enabled: false, voice: "robot", audioHost: 7 },
+        live: {
+          enabled: false,
+          voice: "robot",
+          audioHost: 7,
+          idleHangupSeconds: -1,
+          parkAfterSeconds: "soon",
+        },
         pets: { enabled: true, placement: "ceiling", state: "sleeping", thinkingState: "ponder" },
       });
 
@@ -425,6 +457,8 @@ describe("config helpers", () => {
     expect(descriptors.get("live.enabled")?.parse("true")).toBe(true);
     expect(descriptors.get("live.voice")?.parse("vale")).toBe("vale");
     expect(descriptors.get("live.audioHost")?.parse(" me@audio-pc ")).toBe("me@audio-pc");
+    expect(descriptors.get("live.idleHangupSeconds")?.parse("120")).toBe(120);
+    expect(descriptors.get("live.parkAfterSeconds")?.parse("0")).toBe(0);
   });
 
   test("applies settings writes with persisted raw config shapes", () => {

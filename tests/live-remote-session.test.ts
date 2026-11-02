@@ -406,6 +406,20 @@ describe("RemoteLiveMedia (client)", () => {
     expect(proc.kill).toHaveBeenCalled();
   });
 
+  test("parking a host that cannot park closes it, so the next session starts another", async () => {
+    const { proc, media } = clientSetup();
+    void media.createOffer().catch(() => undefined);
+    acceptOpen(proc);
+    await vi.waitFor(() => expect(proc.written).toHaveLength(2));
+
+    // what a session does at a park: ask the media to wait if it can, close it if it cannot
+    const parking = media.park ? media.park() : media.close();
+    await vi.waitFor(() => expect(proc.written.at(-1)).toMatchObject({ type: "close" }));
+    proc.exit(0);
+    await parking;
+    expect(proc.written.map((frame) => frame.type)).not.toContain("park");
+  });
+
   test("pings the host while the session lives and stops when it closes", async () => {
     const { proc, media } = clientSetup({ pingMs: 20 });
     void media.createOffer().catch(() => undefined);

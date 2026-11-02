@@ -1,7 +1,7 @@
 import { EventEmitter } from "node:events";
 import { Writable } from "node:stream";
 import type { LiveMediaFactory } from "../media.ts";
-import { createRemoteMediaFactory, type RemoteMediaProcess } from "../remote/client.ts";
+import { createParkableMediaFactory, type RemoteMediaProcess } from "../remote/client.ts";
 import type { LiveBridgeConnection } from "./socket.ts";
 
 /**
@@ -42,12 +42,10 @@ export function bridgeMediaProcess(connection: LiveBridgeConnection): RemoteMedi
   } as RemoteMediaProcess;
 }
 
-/** Media over one phone connection; a connection carries one call. */
+/**
+ * Media over one phone connection. A connection carries one call, in one session or in several
+ * when the phone parks: it then keeps its devices between them.
+ */
 export function createBridgeMediaFactory(connection: LiveBridgeConnection): LiveMediaFactory {
-  let used = false;
-  return createRemoteMediaFactory(() => {
-    if (used) throw new Error("The phone connection carries one call.");
-    used = true;
-    return bridgeMediaProcess(connection);
-  });
+  return createParkableMediaFactory(() => bridgeMediaProcess(connection));
 }

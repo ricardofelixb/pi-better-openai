@@ -32,6 +32,7 @@ export type LiveServerEvent =
       type: "session.started" | "session.updated";
       session: { id: string; instructions?: string };
     }
+  | { type: "session.usage.updated"; usage: { audio_duration_ms: number } }
   | { type: "output_audio.delta"; audio: string }
   | { type: "input_transcript.added" | "output_transcript.added"; item: { text: string } }
   | { type: "turn.done"; turn: { role: "user" | "assistant"; transcript: string } }
@@ -75,6 +76,15 @@ function parseSessionEvent(
     return { type, session: { id: session.id, instructions: session.instructions } };
   }
   return { type, session: { id: session.id } };
+}
+
+/** The server's own count of how long this session has been connected, which is what is billed. */
+function parseUsageUpdatedEvent(payload: UnknownRecord): LiveServerEvent | null {
+  const usage = payload.usage;
+  if (!isRecord(usage)) return null;
+  const duration = usage.audio_duration_ms;
+  if (typeof duration !== "number" || !Number.isFinite(duration) || duration < 0) return null;
+  return { type: "session.usage.updated", usage: { audio_duration_ms: duration } };
 }
 
 function parseTranscriptAddedEvent(
@@ -149,6 +159,8 @@ export function parseLiveServerEvent(payload: unknown): LiveServerEvent | null {
     case "session.started":
     case "session.updated":
       return parseSessionEvent(parsed.type, parsed);
+    case "session.usage.updated":
+      return parseUsageUpdatedEvent(parsed);
     case "output_audio.delta":
       return typeof parsed.audio === "string" ? { type: parsed.type, audio: parsed.audio } : null;
     case "input_transcript.added":

@@ -20,7 +20,13 @@ import type {
 import { OriginCancelled, OriginError, type MediaTarget } from "../src/live/remote/origin.ts";
 import type { ChooseComputer } from "../src/live/remote/origin.ts";
 import { LIVE_VISUALIZER_TOGGLE_KEY } from "../src/live/visualizer.ts";
+import { requestCodexUsage } from "../src/usage.ts";
 import { makeResolvedConfig } from "./helpers.ts";
+
+vi.mock("../src/usage.ts", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../src/usage.ts")>()),
+  requestCodexUsage: vi.fn(async () => undefined),
+}));
 
 type CommandOptions = {
   description?: string;
@@ -160,6 +166,7 @@ function makeSessionStub(options: LiveSessionControllerOptions) {
     start: vi.fn(async () => options.callbacks.onTerminal()),
     stop: vi.fn(async () => undefined),
     toggleMute: vi.fn(),
+    resume: vi.fn(),
     handleAgentMessage: vi.fn(),
     handleAgentSettled: vi.fn(),
   };
@@ -580,5 +587,111 @@ describe("registerOpenAILive", () => {
     expect(notifyUnfocused.mock.calls[0]?.[1]).toBe("project · session-7");
 
     await run;
+  });
+});
+
+describe("what a call costs", () => {
+  /** A local call whose session reports its billed seconds and then stays up until it is ended. */
+  async function localCall(report: (options: LiveSessionControllerOptions) => void) {
+    const harness = createRegistrationHarness();
+    const sessions: Array<ReturnType<typeof makeSessionStub>> = [];
+    const arbiter = makeFakeArbiter();
+    const notify = vi.fn();
+    registerOpenAILive(
+      harness.pi,
+      () => makeResolvedConfig({ live: { enabled: true, voice: "sol", audioHost: "" } }),
+      {
+        createSession: (options) => {
+          const stub = { ...makeSessionStub(options), start: vi.fn(async () => report(options)) };
+          sessions.push(stub);
+          return stub;
+        },
+        createArbiter: arbiter.createArbiter,
+        probeFocusReporting: vi.fn(async () => true),
+        attachFocusReporting: vi.fn(() => vi.fn()),
+        notifyActivatedUnfocused: vi.fn(),
+        tickMs: 60_000,
+      },
+    );
+    const captured: CapturedCustom = { component: undefined, tui: makeFakeTui() };
+    const ctx = makeContext(makeCustomMock(captured), notify);
+    const run = commandFrom(harness).handler("", ctx);
+    await vi.waitFor(() => requireCallbacks(arbiter));
+    requireCallbacks(arbiter).onActivated("focus");
+    await vi.waitFor(() => expect(sessions[0]?.start).toHaveBeenCalled());
+    const end = () => {
+      captured.component!.handleInput!("\u001b");
+      return run;
+    };
+    return { sessions, captured, notify, end };
+  }
+
+  const used = (percent: number) => ({ rate_limit: { primary_window: { used_percent: percent } } });
+
+  test("asks a session to hang up when idle and to park during work, as configured", async () => {
+    const { sessions, end } = await localCall(() => undefined);
+    const options = sessions[0]!.options;
+    expect(options.idleHangupSeconds).toBe(120);
+    expect(options.parkAfterSeconds).toBe(20);
+    // a computer's own media can always be closed and opened again
+    expect(options.canPark).toBeUndefined();
+    expect(typeof options.chat).toBe("function");
+    await end();
+  });
+
+  test("shows the connected time while the call runs, and sums it over the sessions", async () => {
+    const { sessions, captured, end } = await localCall((options) =>
+      options.callbacks.onUsage?.(192),
+    );
+    expect(captured.component!.render(80).join("\n")).toContain("3m 12s");
+    await end();
+    expect(sessions).toHaveLength(1);
+  });
+
+  test("leaves a readout of the time connected and how far the five-hour window moved", async () => {
+    vi.mocked(requestCodexUsage).mockResolvedValueOnce(used(12)).mockResolvedValueOnce(used(14));
+    const { notify, end } = await localCall((options) => options.callbacks.onUsage?.(192));
+    await end();
+    await vi.waitFor(() =>
+      expect(notify).toHaveBeenCalledWith(
+        "Live call: 3m 12s connected \u00b7 5-hour window 12% \u2192 14%",
+        "info",
+      ),
+    );
+  });
+
+  test("gives the time alone when the plan's meter cannot be read", async () => {
+    vi.mocked(requestCodexUsage).mockRejectedValue(new Error("Codex usage request failed (500)"));
+    try {
+      const { notify, end } = await localCall((options) => options.callbacks.onUsage?.(45));
+      await end();
+      await vi.waitFor(() =>
+        expect(notify).toHaveBeenCalledWith("Live call: 45s connected", "info"),
+      );
+    } finally {
+      vi.mocked(requestCodexUsage).mockReset();
+      vi.mocked(requestCodexUsage).mockResolvedValue(undefined);
+    }
+  });
+
+  test("says nothing of a call that never connected", async () => {
+    const { notify, end } = await localCall(() => undefined);
+    await end();
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(notify).not.toHaveBeenCalled();
+  });
+
+  test("resumes a parked call from the visualizer's key, and only then", async () => {
+    const { sessions, captured, end } = await localCall((options) =>
+      options.callbacks.onPhase("working"),
+    );
+    captured.component!.handleInput!("r");
+    expect(sessions[0]!.resume).not.toHaveBeenCalled();
+
+    sessions[0]!.options.callbacks.onPhase("parked");
+    expect(captured.component!.render(80).join("\n")).toContain("r resume");
+    captured.component!.handleInput!("r");
+    expect(sessions[0]!.resume).toHaveBeenCalledOnce();
+    await end();
   });
 });

@@ -30,6 +30,7 @@ export type LivePhase =
   | "working"
   | "speaking"
   | "muted"
+  | "parked"
   | "error";
 
 export interface LiveTranscript {
@@ -44,6 +45,11 @@ export interface LiveSessionCallbacks {
   onLevels(input: number, output: number): void;
   onTranscript(transcript: LiveTranscript | undefined): void;
   onTerminal(error?: Error): void;
+  /**
+   * The seconds this call has been connected, which is what a plan is billed, summed over its
+   * sessions. On every server update and again when a session ends.
+   */
+  onUsage?(seconds: number): void;
 }
 
 export interface LiveTransport {
@@ -51,6 +57,8 @@ export interface LiveTransport {
   send(message: LiveClientMessage): Promise<void>;
   setMuted(muted: boolean): void;
   close(): Promise<void>;
+  /** Like close, but media that can wait keeps its devices for the next session. */
+  park?(): Promise<void>;
 }
 
 export interface LiveSessionControllerOptions {
@@ -58,8 +66,20 @@ export interface LiveSessionControllerOptions {
   getCredentials(signal?: AbortSignal): Promise<CodexCredentials | undefined>;
   delegate(request: string): void;
   callbacks: LiveSessionCallbacks;
-  /** The session's text chat so far, which the voice starts out knowing. */
-  chat?: string;
+  /**
+   * The session's text chat so far, which the voice starts out knowing. A function is asked each
+   * time a session opens, so one that follows a park hears what happened meanwhile.
+   */
+  chat?: string | (() => string);
+  /** Seconds without speech or work after which the call hangs up as the user would; 0 never. */
+  idleHangupSeconds?: number;
+  /**
+   * Seconds a delegation may run with nobody speaking before the session is closed, which stops
+   * the meter; the call stays, and a fresh session says the result. 0 never.
+   */
+  parkAfterSeconds?: number;
+  /** Whether the call can wait without its session. Asked each time; a phone says in its hello. */
+  canPark?(): boolean;
   voice?: string;
   signal?: AbortSignal;
   native?: LiveNativeBindings;
@@ -127,6 +147,20 @@ export class LiveSessionController {
   #userTranscriptTurn = 0;
   #assistantTranscriptTurn = 0;
   #lastTranscript: LiveTranscript | undefined;
+  #sessionNumber = 0;
+  /** Connected and not parking: the session is there to be spoken to and is being billed. */
+  #sessionLive = false;
+  #parked = false;
+  #resuming = false;
+  /** A delegation of a session that has closed: its result goes in as plain context. */
+  #delegationDetached = false;
+  #pendingResult: string | undefined;
+  #lastActivity = 0;
+  #timer: NodeJS.Timeout | undefined;
+  #billedSeconds = 0;
+  #sessionStartedAt: number | undefined;
+  #reportedMs = 0;
+  #reportedAt = 0;
 
   constructor(options: LiveSessionControllerOptions) {
     this.#options = options;
@@ -159,40 +193,100 @@ export class LiveSessionController {
     this.#emitTranscript(undefined);
 
     try {
-      // Awaited only when there is something to wait for, so the default path keeps its timing.
-      const createMedia = this.#options.resolveMedia
-        ? await this.#options.resolveMedia(this.#options.signal)
-        : undefined;
-      if (this.#stopped) {
-        throw this.#failure ?? new Error("The live session stopped while connecting.");
-      }
-      const native = this.#native ?? loadLiveNative();
-      this.#native = native;
-      const transport = this.#createTransport({
-        getCredentials: this.#options.getCredentials,
-        sessionId: this.#options.sessionId,
-        instructions: withChat(LIVE_INSTRUCTIONS, this.#options.chat ?? ""),
-        voice: this.#voice,
-        signal: this.#options.signal,
-        native,
-        ...(createMedia ? { createMedia } : {}),
-        callbacks: {
-          onEvent: (event) => this.#guardEvent(() => this.#handleLiveEvent(event)),
-          onLevels: (input, output) => this.#guardEvent(() => this.#handleLevels(input, output)),
-        },
-      });
-      this.#transport = transport;
-      await transport.connect();
-      if (this.#stopped)
-        throw this.#failure ?? new Error("The live session stopped while connecting.");
-      transport.setMuted(this.#muted);
-      this.#refreshAudioPhase();
+      await this.#openSession();
     } catch (cause) {
       const error = errorFrom(cause);
       this.#reportFailure(error);
       await this.stop();
       throw error;
     }
+  }
+
+  /** Brings a parked call back with a fresh session, ahead of the agent finishing. */
+  resume(): void {
+    if (!this.#parked) return;
+    this.#delegationDetached = this.#activeDelegationId !== undefined;
+    void this.#resume();
+  }
+
+  async #openSession(): Promise<void> {
+    // Awaited only when there is something to wait for, so the default path keeps its timing.
+    const createMedia = this.#options.resolveMedia
+      ? await this.#options.resolveMedia(this.#options.signal)
+      : undefined;
+    if (this.#stopped) {
+      throw this.#failure ?? new Error("The live session stopped while connecting.");
+    }
+    const native = this.#native ?? loadLiveNative();
+    this.#native = native;
+    const chat = this.#options.chat;
+    const session = ++this.#sessionNumber;
+    const transport = this.#createTransport({
+      getCredentials: this.#options.getCredentials,
+      sessionId: this.#options.sessionId,
+      instructions: withChat(LIVE_INSTRUCTIONS, typeof chat === "function" ? chat() : (chat ?? "")),
+      voice: this.#voice,
+      signal: this.#options.signal,
+      native,
+      ...(createMedia ? { createMedia } : {}),
+      callbacks: {
+        onEvent: (event) => this.#guardEvent(session, () => this.#handleLiveEvent(event)),
+        onLevels: (input, output) =>
+          this.#guardEvent(session, () => this.#handleLevels(input, output)),
+      },
+    });
+    this.#transport = transport;
+    // before connecting, which is what opens the microphone: a muted call is never heard unmuted
+    transport.setMuted(this.#muted);
+    await transport.connect();
+    if (this.#stopped)
+      throw this.#failure ?? new Error("The live session stopped while connecting.");
+    this.#sessionStartedAt ??= Date.now();
+    this.#sessionLive = true;
+    this.#touch();
+    this.#sayPendingResult();
+    this.#refreshAudioPhase();
+    this.#armTimer();
+  }
+
+  async #resume(): Promise<void> {
+    if (this.#resuming || this.#stopped) return;
+    this.#resuming = true;
+    this.#parked = false;
+    this.#emitPhase("connecting");
+    try {
+      await this.#openSession();
+    } catch (cause) {
+      this.#reportFailure(errorFrom(cause));
+    } finally {
+      this.#resuming = false;
+    }
+  }
+
+  /** Closes the session to stop the meter, and keeps the call for a fresh one. */
+  async #park(): Promise<void> {
+    const transport = this.#transport;
+    if (!transport || !this.#sessionLive || this.#stopped) return;
+    this.#sessionLive = false;
+    this.#clearTimer();
+    this.#transport = undefined;
+    this.#endSession();
+    this.#inputLevel = 0;
+    this.#outputLevel = 0;
+    this.#emitLevels();
+    try {
+      await this.#sendChain;
+      await transport.send(buildSessionClose()).catch(() => undefined);
+      await (transport.park ? transport.park() : transport.close());
+    } catch (cause) {
+      this.#reportFailure(errorFrom(cause));
+      return;
+    }
+    if (this.#stopped) return;
+    this.#parked = true;
+    this.#emitPhase("parked", true);
+    // the agent finished while the session was closing
+    if (this.#pendingResult !== undefined) void this.#resume();
   }
 
   toggleMute(): void {
@@ -224,7 +318,8 @@ export class LiveSessionController {
       return;
     }
     if (snapshot.stopReason === "toolUse") {
-      if (!snapshot.text) return;
+      // a detached delegation belongs to a session that has closed, and the new one never heard of it
+      if (!snapshot.text || this.#delegationDetached) return;
       for (const chunk of chunkLiveContext(snapshot.text)) {
         this.#queueSend(
           buildDelegationContextAppend(this.#activeDelegationId, chunk, "commentary"),
@@ -242,12 +337,38 @@ export class LiveSessionController {
     const finalText =
       this.#pendingAgentFinal || "The requested coding task ended without a final response.";
     const context = `"Agent Final Message":\n\n${finalText}`;
-    for (const chunk of chunkLiveContext(context)) {
-      this.#queueSend(buildDelegationContextAppend(delegationId, chunk));
-    }
+    const detached = this.#delegationDetached;
     this.#activeDelegationId = undefined;
+    this.#delegationDetached = false;
     this.#pendingAgentFinal = "";
+    if (this.#parked) {
+      this.#pendingResult = context;
+      void this.#resume();
+    } else if (!this.#sessionLive) {
+      this.#pendingResult = context;
+    } else if (detached) {
+      this.#sayResult(context);
+    } else {
+      for (const chunk of chunkLiveContext(context)) {
+        this.#queueSend(buildDelegationContextAppend(delegationId, chunk));
+      }
+    }
+    this.#touch();
     this.#refreshAudioPhase();
+    this.#armTimer();
+  }
+
+  /** The result of work the session did not hear started, as context the voice says unprompted. */
+  #sayResult(context: string): void {
+    for (const chunk of chunkLiveContext(context)) {
+      this.#queueSend(buildSessionContextAppend(chunk, "speakable"));
+    }
+  }
+
+  #sayPendingResult(): void {
+    const context = this.#pendingResult;
+    this.#pendingResult = undefined;
+    if (context !== undefined) this.#sayResult(context);
   }
 
   stop(): Promise<void> {
@@ -265,9 +386,12 @@ export class LiveSessionController {
       cleanupError = errorFrom(cause);
     }
 
+    this.#sessionLive = false;
+    this.#clearTimer();
     await this.#sendChain;
     const transport = this.#transport;
     this.#transport = undefined;
+    this.#endSession();
     if (transport) {
       try {
         await transport.send(buildSessionClose());
@@ -284,8 +408,8 @@ export class LiveSessionController {
     this.#emitTerminal(this.#failure ?? cleanupError);
   }
 
-  #guardEvent(handler: () => void): void {
-    if (this.#stopped) return;
+  #guardEvent(session: number, handler: () => void): void {
+    if (this.#stopped || session !== this.#sessionNumber) return;
     try {
       handler();
     } catch (cause) {
@@ -296,15 +420,24 @@ export class LiveSessionController {
   #handleLiveEvent(event: LiveServerEvent): void {
     switch (event.type) {
       case "session.started":
+        this.#sessionStartedAt ??= Date.now();
         this.#emitPhase("listening");
         break;
+      case "session.usage.updated":
+        this.#reportedMs = event.usage.audio_duration_ms;
+        this.#reportedAt = Date.now();
+        this.#emitUsage();
+        break;
       case "input_transcript.added":
+        this.#touch();
         this.#addTranscript("user", event.item.text);
         break;
       case "output_transcript.added":
+        this.#touch();
         this.#addTranscript("assistant", event.item.text);
         break;
       case "turn.done":
+        this.#touch();
         this.#finishTranscript(event.turn.role, event.turn.transcript);
         break;
       case "delegation.created":
@@ -315,6 +448,8 @@ export class LiveSessionController {
         break;
       case "session.updated":
       case "output_audio.delta":
+        this.#touch();
+        break;
       case "unknown":
         break;
     }
@@ -329,6 +464,8 @@ export class LiveSessionController {
     if (!request) return;
     this.#activeDelegationId = event.item.id;
     this.#pendingAgentFinal = "";
+    this.#touch();
+    this.#armTimer();
     this.#emitPhase("working");
     try {
       this.#options.delegate(request);
@@ -341,6 +478,7 @@ export class LiveSessionController {
     const outputChanged = output !== this.#outputLevel;
     this.#inputLevel = input;
     this.#outputLevel = output;
+    if (output > OUTPUT_ACTIVE_LEVEL) this.#touch();
     this.#emitLevels();
     if (outputChanged && !this.#activeDelegationId) this.#refreshAudioPhase();
   }
@@ -410,7 +548,7 @@ export class LiveSessionController {
 
   #queueSend(message: LiveClientMessage): void {
     const transport = this.#transport;
-    if (!transport || this.#stopped) return;
+    if (!transport || !this.#sessionLive || this.#stopped) return;
     this.#sendChain = this.#sendChain
       .then(async () => {
         if (!this.#stopped) await transport.send(message);
@@ -419,11 +557,89 @@ export class LiveSessionController {
   }
 
   #refreshAudioPhase(): void {
-    if (this.#stopped) return;
+    // a parked or connecting call has its own phase; mute is remembered for the next session
+    if (this.#stopped || this.#parked || !this.#sessionLive) return;
     if (this.#muted) this.#emitPhase("muted");
     else if (this.#activeDelegationId) this.#emitPhase("working");
     else if (this.#outputLevel > OUTPUT_ACTIVE_LEVEL) this.#emitPhase("speaking");
     else this.#emitPhase("listening");
+  }
+
+  /** Something was said, or work began or ended: the call is not idle. */
+  #touch(): void {
+    this.#lastActivity = Date.now();
+  }
+
+  #clearTimer(): void {
+    clearTimeout(this.#timer);
+    this.#timer = undefined;
+  }
+
+  /**
+   * What the quiet is waiting to do: park while a delegation runs, hang up while nothing does.
+   * Asked again when the timer fires, so a phone that cannot park never gets a park armed.
+   */
+  #quietAction(): { action: "park" | "hangup"; seconds: number } | undefined {
+    if (!this.#sessionLive || this.#stopped) return undefined;
+    if (this.#activeDelegationId !== undefined) {
+      const seconds = this.#options.parkAfterSeconds ?? 0;
+      return seconds > 0 && (this.#options.canPark?.() ?? true)
+        ? { action: "park", seconds }
+        : undefined;
+    }
+    const seconds = this.#options.idleHangupSeconds ?? 0;
+    return seconds > 0 ? { action: "hangup", seconds } : undefined;
+  }
+
+  #armTimer(): void {
+    this.#clearTimer();
+    const quiet = this.#quietAction();
+    if (!quiet) return;
+    const left = this.#lastActivity + quiet.seconds * 1000 - Date.now();
+    this.#timer = setTimeout(() => this.#onQuiet(), Math.max(0, left));
+    this.#timer.unref?.();
+  }
+
+  #onQuiet(): void {
+    this.#timer = undefined;
+    const quiet = this.#quietAction();
+    if (!quiet) return;
+    // something was said since the timer was set: wait out what is left of the quiet
+    if (Date.now() - this.#lastActivity < quiet.seconds * 1000) this.#armTimer();
+    else if (quiet.action === "park") void this.#park();
+    else void this.stop();
+  }
+
+  /** The seconds of the current session: the server's last count and the time since it came. */
+  #sessionSeconds(): number {
+    if (this.#sessionStartedAt === undefined) return 0;
+    const now = Date.now();
+    return Math.floor(
+      this.#reportedAt > 0
+        ? (this.#reportedMs + now - this.#reportedAt) / 1000
+        : (now - this.#sessionStartedAt) / 1000,
+    );
+  }
+
+  #emitUsage(): void {
+    const seconds =
+      this.#billedSeconds +
+      (this.#reportedAt > 0 ? Math.floor(this.#reportedMs / 1000) : this.#sessionSeconds());
+    try {
+      this.#callbacks.onUsage?.(seconds);
+    } catch (cause) {
+      this.#reportFailure(errorFrom(cause));
+    }
+  }
+
+  /** Banks the session's seconds, which are final once it is closing. */
+  #endSession(): void {
+    if (this.#sessionStartedAt === undefined) return;
+    this.#billedSeconds += this.#sessionSeconds();
+    this.#sessionStartedAt = undefined;
+    this.#reportedMs = 0;
+    this.#reportedAt = 0;
+    this.#emitUsage();
   }
 
   #emitPhase(phase: LivePhase, force = false): void {
