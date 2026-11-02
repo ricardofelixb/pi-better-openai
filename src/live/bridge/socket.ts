@@ -32,6 +32,7 @@ export class LiveBridgeConnection {
   readonly #decoder = new FrameDecoder(parseBridgeInbound);
   readonly #closeListeners: Array<() => void> = [];
   #control: ((frame: BridgeControlFrame) => void) | undefined;
+  #features: ReadonlySet<string> = new Set();
   #started = false;
   #helloSeen = false;
   #ending = false;
@@ -46,6 +47,11 @@ export class LiveBridgeConnection {
 
   get closed(): boolean {
     return this.#closed || this.#ending;
+  }
+
+  /** What the phone said in its hello that it can do, such as "park" or "usage"; none until then. */
+  get features(): ReadonlySet<string> {
+    return this.#features;
   }
 
   /** Sets who gets the control frames; the latest listener replaces the one before. */
@@ -101,7 +107,10 @@ export class LiveBridgeConnection {
       if (!this.#started && (frame.type !== "hello" || this.#helloSeen)) {
         return void this.#socket.destroy();
       }
-      if (frame.type === "hello") this.#helloSeen = true;
+      if (frame.type === "hello") {
+        this.#helloSeen = true;
+        this.#features = new Set(frame.features);
+      }
       this.output.write(encodeFrame(frame));
     }
   }

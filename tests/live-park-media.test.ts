@@ -11,7 +11,8 @@ function phone(features?: string[]) {
   const connection = new LiveBridgeConnection(near);
   const heard: Frame[] = [];
   let buffered = "";
-  const say = (frame: Record<string, unknown>) => far.write(`${JSON.stringify({ v: 1, ...frame })}\n`);
+  const say = (frame: Record<string, unknown>) =>
+    far.write(`${JSON.stringify({ v: 1, ...frame })}\n`);
   far.setEncoding("utf8");
   far.on("data", (chunk: string) => {
     buffered += chunk;
@@ -82,7 +83,9 @@ describe("media that a phone parks", () => {
     expect(again).toBe(media);
     expect(await again.createOffer()).toBe("offer-sdp");
     again.activate();
-    await vi.waitFor(() => expect(far.types().filter((type) => type === "activate")).toHaveLength(2));
+    await vi.waitFor(() =>
+      expect(far.types().filter((type) => type === "activate")).toHaveLength(2),
+    );
     expect(far.methods()).toEqual(["open", "createOffer", "createOffer"]);
 
     // the session that parked hears nothing more; the fresh one hears the phone

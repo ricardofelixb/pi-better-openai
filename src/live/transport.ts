@@ -429,15 +429,24 @@ export class CodexLiveTransport {
   }
 
   close(): Promise<void> {
+    return this.#shutdown(false);
+  }
+
+  /** Like close, but media that can wait keeps its devices for the next transport. */
+  park(): Promise<void> {
+    return this.#shutdown(true);
+  }
+
+  #shutdown(park: boolean): Promise<void> {
     if (this.#closePromise) return this.#closePromise;
     this.#state = "closing";
     this.#closeController.abort(new DOMException("Live transport closed", "AbortError"));
-    const operation = this.#close();
+    const operation = this.#close(park);
     this.#closePromise = operation;
     return operation;
   }
 
-  async #close(): Promise<void> {
+  async #close(park: boolean): Promise<void> {
     this.#options.signal?.removeEventListener("abort", this.#abortListener);
     const sideband = this.#sideband;
     const media = this.#media;
@@ -452,7 +461,7 @@ export class CodexLiveTransport {
     let closeError: Error | undefined;
     if (media) {
       try {
-        await media.close();
+        await (park && media.park ? media.park() : media.close());
       } catch (cause) {
         closeError = errorFrom(cause);
       }
