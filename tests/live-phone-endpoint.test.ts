@@ -620,6 +620,38 @@ describe("the endpoint of a live voice registration", () => {
     expect(await phone.next("ended")).toEqual({ v: 1, type: "ended" });
   });
 
+  test("goes on pinging a phone that is parked, across the relay", async () => {
+    vi.useFakeTimers({ toFake: ["setInterval", "clearInterval"] });
+    try {
+      const harness = register();
+      const { port } = await connectCall(harness);
+      const phone = connectPhone(port);
+      await phone.opened;
+      phone.send({ type: "hello", features: ["park"] });
+      const open = await phone.next("request");
+      phone.send({ type: "response", id: open.id, ok: true });
+      const offer = await phone.next("request");
+      phone.send({ type: "response", id: offer.id, ok: true, sdp: "v=0" });
+      await phone.next("phase");
+      await phone.next("phase");
+
+      await harness.sessions[0]!.media!.park!();
+      harness.sessions[0]!.options.callbacks.onPhase("parked");
+      await phone.next("park");
+      const pings = () => phone.seen.filter((frame) => frame.type === "ping").length;
+      const before = pings();
+      // past the phone's 20 s lease on what Pi sends
+      for (let beat = 1; beat <= 5; beat += 1) {
+        vi.advanceTimersByTime(5_000);
+        await vi.waitFor(() => expect(pings()).toBe(before + beat));
+      }
+      phone.send({ type: "stop" });
+      await phone.next("ended");
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   test("takes the voice from the call's options", async () => {
     const harness = register();
     const { port } = await connectCall(harness, { voice: "vale" });

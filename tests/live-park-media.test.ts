@@ -1,7 +1,10 @@
-import { describe, expect, test, vi } from "vitest";
+import { afterEach, describe, expect, test, vi } from "vitest";
 import { createBridgeMediaFactory } from "../src/live/bridge/media.ts";
 import { connectedPair, LiveBridgeConnection } from "../src/live/bridge/socket.ts";
 import type { LiveMediaCallbacks } from "../src/live/media.ts";
+import { LIVE_MEDIA_LEASE_MS, LIVE_MEDIA_PING_MS } from "../src/live/remote/protocol.ts";
+
+afterEach(() => vi.useRealTimers());
 
 type Frame = Record<string, unknown> & { type: string };
 
@@ -113,6 +116,35 @@ describe("media that a phone parks", () => {
     expect(first.failures).toEqual([]);
 
     expect(() => factory(callbacks())).toThrow("microphone lost");
+  });
+
+  test("keeps pinging the phone while parked, so its lease on Pi never runs out", async () => {
+    vi.useFakeTimers({ toFake: ["setInterval", "clearInterval", "setTimeout", "clearTimeout"] });
+    const far = phone(["park"]);
+    const factory = createBridgeMediaFactory(far.connection);
+    const media = factory(callbacks());
+    await vi.advanceTimersByTimeAsync(0);
+    await media.createOffer();
+    const pings = () => far.types().filter((type) => type === "ping").length;
+
+    await vi.advanceTimersByTimeAsync(LIVE_MEDIA_PING_MS);
+    await vi.waitFor(() => expect(pings()).toBe(1));
+
+    await media.park!();
+    await vi.waitFor(() => expect(far.types()).toContain("park"));
+    // a whole lease of parked time: a ping on every beat, and no frame that ends the phone's devices
+    const beats = Math.ceil(LIVE_MEDIA_LEASE_MS / LIVE_MEDIA_PING_MS) + 1;
+    for (let beat = 1; beat <= beats; beat += 1) {
+      await vi.advanceTimersByTimeAsync(LIVE_MEDIA_PING_MS);
+      await vi.waitFor(() => expect(pings()).toBe(1 + beat));
+    }
+    expect(far.types()).not.toContain("close");
+
+    // and a resumed session goes on as before
+    const again = factory(callbacks());
+    await vi.advanceTimersByTimeAsync(LIVE_MEDIA_PING_MS);
+    await vi.waitFor(() => expect(pings()).toBe(2 + beats));
+    await again.close();
   });
 
   test("carries one call at a time, and a parked one is not carried over a closed connection", async () => {
