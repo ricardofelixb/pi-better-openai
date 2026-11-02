@@ -65,14 +65,17 @@ export const CALL_FRAME_TYPES: ReadonlySet<string> = new Set([
   "failure",
   "stop",
   "set-muted",
+  "resume",
   "start",
   "request",
   "activate",
+  "park",
   "mute",
   "ping",
   "close",
   "ready",
   "phase",
+  "usage",
   "transcript",
   "transcript-clear",
   "ended",
@@ -85,6 +88,7 @@ const PHASES: ReadonlySet<unknown> = new Set<LivePhase>([
   "working",
   "speaking",
   "muted",
+  "parked",
   "error",
 ]);
 
@@ -95,6 +99,8 @@ const isTurn: Check = (value) =>
 const isPane: Check = (value) =>
   typeof value === "string" && value.length > 0 && value.length <= 128;
 const isPhase: Check = (value) => PHASES.has(value);
+const isSeconds: Check = (value) =>
+  typeof value === "number" && Number.isSafeInteger(value) && value >= 0;
 const isRole: Check = (value) => value === "user" || value === "assistant";
 const isTranscript: Check = (value) =>
   typeof value === "string" && value.length <= MAX_TRANSCRIPT_LENGTH;
@@ -106,6 +112,7 @@ const isEndedError: Check = (value) =>
 const CALL_SHAPES = new Map<string, Shape>([
   ["ready", { required: { pid: isPid, busy: isBoolean }, optional: { pane: isPane } }],
   ["phase", { required: { phase: isPhase } }],
+  ["usage", { required: { seconds: isSeconds } }],
   [
     "transcript",
     { required: { role: isRole, text: isTranscript, turn: isTurn, final: isBoolean } },

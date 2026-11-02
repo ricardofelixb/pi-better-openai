@@ -15,19 +15,27 @@ export const MAX_REQUEST_TIMEOUT_MS = 120_000;
 export const LIVE_MEDIA_PING_MS = 5_000;
 export const LIVE_MEDIA_LEASE_MS = 20_000;
 const MAX_NODE_ID_LENGTH = 256;
+export const MAX_FEATURES = 8;
+export const MAX_FEATURE_LENGTH = 32;
 
 export type ClientFrame =
   | { type: "request"; id: number; method: "open" | "createOffer" }
   | { type: "request"; id: number; method: "acceptAnswer"; sdp: string }
   | { type: "request"; id: number; method: "waitForOpen"; timeoutMs?: number }
   | { type: "activate" }
+  /** Close the peer connection and data channel and stop the levels; keep the microphone and the connection. */
+  | { type: "park" }
   | { type: "mute"; muted: boolean }
   | { type: "ping" }
   | { type: "close" };
 
 export type HostFrame =
-  /** `node` is the media host's own Tailscale node id, so the Pi host can check who answered. */
-  | { type: "hello"; node?: string }
+  /**
+   * `node` is the media host's own Tailscale node id, so the Pi host can check who answered.
+   * `features` names what a host can do beyond the first version of the protocol, such as
+   * "park" and "usage"; a name Pi does not know is ignored.
+   */
+  | { type: "hello"; node?: string; features?: string[] }
   | { type: "response"; id: number; ok: true; sdp?: string }
   | { type: "response"; id: number; ok: false; error: string }
   | { type: "event"; payload: string }
@@ -64,6 +72,10 @@ const isMessage: Check = (value) =>
 const isLevel: Check = (value) =>
   typeof value === "number" && Number.isFinite(value) && value >= 0 && value <= 1;
 export const isBoolean: Check = (value) => typeof value === "boolean";
+const isFeatures: Check = (value) =>
+  Array.isArray(value) &&
+  value.length <= MAX_FEATURES &&
+  value.every((name) => typeof name === "string" && name.length <= MAX_FEATURE_LENGTH);
 const isNodeId: Check = (value) => isText(value) && (value as string).length <= MAX_NODE_ID_LENGTH;
 const isTimeout: Check = (value) =>
   typeof value === "number" &&
@@ -73,6 +85,7 @@ const isTimeout: Check = (value) =>
 
 const CLIENT_SHAPES = new Map<string, Shape>([
   ["activate", {}],
+  ["park", {}],
   ["close", {}],
   ["ping", {}],
   ["mute", { required: { muted: isBoolean } }],
@@ -86,7 +99,7 @@ const REQUEST_SHAPES = new Map<string, Shape>([
 ]);
 
 const HOST_SHAPES = new Map<string, Shape>([
-  ["hello", { optional: { node: isNodeId } }],
+  ["hello", { optional: { node: isNodeId, features: isFeatures } }],
   ["event", { required: { payload: isText } }],
   ["levels", { required: { input: isLevel, output: isLevel } }],
   ["failure", { required: { message: isMessage } }],
