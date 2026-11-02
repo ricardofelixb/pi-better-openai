@@ -13,6 +13,8 @@ type FakeSession = {
   sent: LiveClientMessage[];
   closed: boolean;
   parked: boolean;
+  /** What the controller asked of the transport, in order. */
+  calls: string[];
   emit(event: LiveServerEvent): void;
 };
 
@@ -47,13 +49,14 @@ function harness(overrides: Partial<LiveSessionControllerOptions> = {}) {
         sent: [],
         closed: false,
         parked: false,
+        calls: [],
         emit: (event) => options.callbacks.onEvent(event),
       };
       sessions.push(session);
       return {
-        connect: vi.fn(async () => undefined),
+        connect: vi.fn(async () => void session.calls.push("connect")),
         send: vi.fn(async (message: LiveClientMessage) => void session.sent.push(message)),
-        setMuted: vi.fn(),
+        setMuted: vi.fn((muted: boolean) => void session.calls.push(`mute:${muted}`)),
         close: vi.fn(async () => void (session.closed = true)),
         park: vi.fn(async () => void (session.parked = true)),
       };
@@ -269,6 +272,24 @@ describe("parking", () => {
     // the new session has no such delegation, so the result goes in as plain context
     expect(sessions[1]!.sent.map((message) => message.type)).toEqual(["session.context.append"]);
     expect(sessions[1]!.sent[0]).toMatchObject({ channel: "speakable" });
+  });
+
+  test("a muted call stays muted through the park: the fresh session is told before it connects", async () => {
+    const { controller, sessions } = harness({ parkAfterSeconds: 20, idleHangupSeconds: 0 });
+    await controller.start();
+    controller.toggleMute();
+    sessions[0]!.emit(DELEGATION);
+    await seconds(20);
+
+    controller.resume();
+    await settle();
+    expect(sessions).toHaveLength(2);
+    // connecting is what opens the microphone, so the mute has to be there first
+    expect(sessions[1]!.calls.indexOf("mute:true")).toBeGreaterThanOrEqual(0);
+    expect(sessions[1]!.calls.indexOf("mute:true")).toBeLessThan(
+      sessions[1]!.calls.indexOf("connect"),
+    );
+    expect(sessions[1]!.calls).not.toContain("mute:false");
   });
 
   test("an agent that settles while the session is closing is still spoken", async () => {
