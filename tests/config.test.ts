@@ -48,7 +48,13 @@ describe("config helpers", () => {
     expect(_test.DEFAULT_CONFIG.usage?.autoRedeemBankedResets).toBe(true);
     expect(_test.DEFAULT_IMAGE_CONFIG.defaultModel).toBe("gpt-image-2.5");
     expect(_test.DEFAULT_IMAGE_CONFIG.defaultSave).toBe("project");
-    expect(_test.DEFAULT_LIVE_CONFIG).toEqual({ enabled: true, voice: "sol", audioHost: "" });
+    expect(_test.DEFAULT_LIVE_CONFIG).toEqual({
+      enabled: true,
+      voice: "sol",
+      audioHost: "",
+      idleHangupSeconds: 120,
+      parkAfterSeconds: 20,
+    });
     expect(_test.DEFAULT_PET_CONFIG.placement).toBe("inline-right");
     expect(_test.DEFAULT_PET_CONFIG.state).toBe("idle");
     expect(_test.DEFAULT_PET_CONFIG.thinkingState).toBe("review");
