@@ -31,6 +31,8 @@ describe("parseBridgeInbound", () => {
       type: "set-muted",
       muted: true,
     });
+    expect(parseBridgeInbound(frame({ type: "resume" }))).toEqual({ type: "resume" });
+    expect(isBridgeControl(parseBridgeInbound(frame({ type: "resume" })))).toBe(true);
   });
 
   test("hands every media frame to the remote host parser unchanged", () => {
@@ -157,6 +159,20 @@ describe("encodeBridgeFrame", () => {
     expect(String(out.error).length).toBeLessThanOrEqual(MAX_ENDED_ERROR_LENGTH);
     expect([...String(out.error)].every((character) => character.charCodeAt(0) > 31)).toBe(true);
     expect(decoded(encodeBridgeFrame({ type: "ended" }))).toEqual({ v: 1, type: "ended" });
+  });
+
+  test("encodes the call's billed seconds and the park request", () => {
+    expect(decoded(encodeBridgeFrame({ type: "usage", seconds: 192 }))).toEqual({
+      v: 1,
+      type: "usage",
+      seconds: 192,
+    });
+    expect(decoded(encodeBridgeFrame({ type: "phase", phase: "parked" }))).toEqual({
+      v: 1,
+      type: "phase",
+      phase: "parked",
+    });
+    expect(decoded(encodeBridgeFrame({ type: "park" }))).toEqual({ v: 1, type: "park" });
   });
 
   test("passes the media requests through the existing encoder", () => {
