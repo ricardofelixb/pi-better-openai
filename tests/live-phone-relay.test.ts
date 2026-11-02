@@ -1,5 +1,6 @@
-import { duplexPair, type Duplex } from "node:stream";
+import type { Duplex } from "node:stream";
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
+import { connectedPair } from "../src/live/bridge/socket.ts";
 import {
   type LivePhoneCall,
   type LivePhoneRelayOptions,
@@ -14,7 +15,8 @@ const text = (body: Record<string, unknown>) => JSON.stringify({ v: 1, ...body }
 
 /** Pi's end of the connection: what the relay wrote to it, and what it can say back. */
 function fakePi() {
-  const [relaySide, piSide] = duplexPair();
+  // the pair the endpoint hands the relay: a bare duplexPair() would not close one end with the other
+  const [relaySide, piSide] = connectedPair();
   const lines: Frame[] = [];
   let buffered = "";
   let hungUp = false;
@@ -27,6 +29,7 @@ function fakePi() {
     }
   });
   piSide.on("end", () => (hungUp = true));
+  piSide.on("close", () => (hungUp = true));
   piSide.on("error", () => undefined);
   return {
     relaySide,
