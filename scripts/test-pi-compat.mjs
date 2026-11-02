@@ -8,6 +8,8 @@ const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const home = await mkdtemp(join(tmpdir(), "pi-extension-compat-"));
 const previousHome = process.env.PI_CODING_AGENT_DIR;
 const previousFetch = globalThis.fetch;
+const previousDecisionsKey = process.env.OPENAI_DECISIONS_API_KEY;
+process.env.OPENAI_DECISIONS_API_KEY = "synthetic-decisions-key";
 process.env.PI_CODING_AGENT_DIR = home;
 globalThis.fetch = async () => new Response("", { status: 503 });
 let session;
@@ -21,7 +23,7 @@ try {
     SettingsManager,
     VERSION,
   } = await import("@earendil-works/pi-coding-agent");
-  assert.equal(VERSION, "1.1.0", "test the actual pinned Pi host, not a stale override");
+  assert.equal(VERSION, "1.3.0", "test the actual pinned Pi host, not a stale override");
   const manifest = JSON.parse(await readFile(join(root, "package.json"), "utf8"));
   for (const name of [
     "@earendil-works/pi-ai",
@@ -88,6 +90,16 @@ try {
   const errors = [];
   session.extensionRunner.onError((error) => errors.push(error));
   await session.bindExtensions({});
+  const commands = loaded.extensions[0].commands;
+  const tierCompletions = await commands.get("openai-tier").getArgumentCompletions("ultra");
+  assert.equal(tierCompletions[0].value, "ultrafast");
+  const modelCompletions = await commands
+    .get("openai-decisions")
+    .getArgumentCompletions("use openai-d");
+  assert.deepEqual(
+    modelCompletions.map((item) => item.value),
+    ["use openai-decisions/gpt-6-luna"],
+  );
   assert.equal(modelRuntime.getProvider("openai")?.auth?.oauth?.isSubscription, true);
   assert.match(modelRuntime.getProvider("openai-codex")?.name ?? "", /legacy/i);
   const decisionsModel = modelRuntime.getModelOfType("classifier", "openai", "gpt-6-luna");
@@ -111,10 +123,66 @@ try {
   const openaiModel = modelRuntime.getModel("openai", "gpt-6-astra");
   assert.equal(openaiModel?.api, "openai-responses");
   assert.equal(openaiModel?.baseUrl, "https://api.openai.com/v1");
+  for (const id of ["gpt-6-astra", "gpt-6.1-sol"]) {
+    assert.ok(
+      (await modelRuntime.getAvailableOfType("chat", "openai")).some(
+        (model) => model.id === id && model.api === "openai-responses",
+      ),
+      `${id}: direct OpenAI subscription model must remain available without Codex auth`,
+    );
+  }
   assert.ok(
     modelRuntime.getModel("openai-codex", "gpt-6.1-sol"),
     "legacy fallback models remain registered",
   );
+  const separateDecisions = modelRuntime.getModelOfType(
+    "classifier",
+    "openai-decisions",
+    "gpt-6-luna",
+  );
+  assert.ok(separateDecisions, "separate API-only Decisions model is registered");
+  assert.deepEqual(await modelRuntime.getAvailableOfType("classifier", "openai-decisions"), [
+    separateDecisions,
+  ]);
+  assert.deepEqual(modelRuntime.getProvider("openai-decisions").getModels(), []);
+  const separateResult = await modelRuntime.classify(
+    separateDecisions,
+    {
+      state: { approved: true },
+      questions: {
+        approved: {
+          type: "bool",
+          instructions: "Is it approved?",
+          criteria: { true: "Approved", false: "Not approved" },
+        },
+      },
+    },
+    {
+      fetch: async (url, init) => {
+        assert.equal(String(url), "https://api.openai.com/v1/decisions");
+        assert.equal(
+          new Headers(init.headers).get("authorization"),
+          "Bearer synthetic-decisions-key",
+        );
+        return Response.json({
+          answers: [{ name: "approved", type: "predicate", probability: 0.9 }],
+          usage: { input_tokens: 20, output_tokens: 0 },
+        });
+      },
+    },
+  );
+  assert.equal(separateResult.stopReason, "stop");
+  assert.equal(separateResult.provider, "openai-decisions");
+  assert.equal(
+    modelRuntime.isUsingOAuth("openai"),
+    true,
+    "Decisions API billing must not change chat auth",
+  );
+  assert.equal(
+    (await modelRuntime.getAuth("openai"))?.auth.apiKey,
+    "synthetic-openai-subscription-token",
+  );
+  assert.deepEqual(await modelRuntime.getAvailableOfType("classifier", "openai"), []);
   await modelRuntime.setRuntimeApiKey("openai", "synthetic-api-key");
   assert.equal(
     modelRuntime.isUsingOAuth("openai"),
@@ -126,6 +194,14 @@ try {
       (model) => model.id === "gpt-6-luna",
     ),
   );
+  for (const id of ["gpt-6-astra", "gpt-6.1-sol"]) {
+    assert.ok(
+      (await modelRuntime.getAvailableOfType("chat", "openai")).some(
+        (model) => model.id === id && model.baseUrl === "https://api.openai.com/v1",
+      ),
+      `${id}: API-key access must stay on the native OpenAI route`,
+    );
+  }
   const decisionRequests = [];
   globalThis.fetch = async (url, init) => {
     assert.equal(String(url), "https://api.openai.com/v1/decisions");
@@ -178,9 +254,38 @@ try {
   assert.equal(decisionRequests.length, 2);
   assert.equal(typeof decisionRequests[0].input, "string");
   assert.equal(decisionRequests[1].input[0].content[1].image_url, "data:image/png;base64,aW1hZ2U=");
-  globalThis.fetch = async () => new Response("", { status: 503 });
   await modelRuntime.removeRuntimeApiKey("openai");
   assert.equal(modelRuntime.isUsingOAuth("openai"), true);
+  globalThis.fetch = async (url, init) => {
+    assert.equal(String(url), "https://api.openai.com/v1/decisions");
+    assert.equal(new Headers(init.headers).get("authorization"), "Bearer synthetic-decisions-key");
+    return Response.json({
+      answers: [{ name: "approved", type: "predicate", probability: 0.9 }],
+      usage: { input_tokens: 20, output_tokens: 0 },
+    });
+  };
+  const splitResult = await codemode.execute(
+    "split-billing-probe",
+    {
+      code: `const available = await models.getAvailableOfType("classifier", "openai-decisions"); const model = available.find(m => m.id === "gpt-6-luna"); if (!model) throw new Error("missing API-only classifier"); return await models.classify(model, { state: { approved: true }, questions: { approved: { type: "bool", instructions: "Is it approved?", criteria: { true: "Approved", false: "Not approved" } } } });`,
+    },
+    undefined,
+    undefined,
+    session.extensionRunner.createToolContext("split-billing-probe", undefined),
+  );
+  const splitText = splitResult.content
+    .filter((block) => block.type === "text")
+    .map((block) => block.text)
+    .join("\n");
+  assert.match(splitText, /Script completed/);
+  assert.match(splitText, /"probability":\s*0\.9/);
+  assert.equal(splitResult.usage.input, 20);
+  assert.equal(modelRuntime.isUsingOAuth("openai"), true);
+  assert.equal(
+    (await modelRuntime.getAuth("openai"))?.auth.apiKey,
+    "synthetic-openai-subscription-token",
+  );
+  globalThis.fetch = async () => new Response("", { status: 503 });
   await session.extensionRunner.emit({ type: "session_shutdown", reason: "quit" });
   assert.deepEqual(errors, [], "real session startup and shutdown must succeed");
   const names = new Set();
@@ -206,6 +311,8 @@ try {
     session.dispose();
   }
   globalThis.fetch = previousFetch;
+  if (previousDecisionsKey === undefined) delete process.env.OPENAI_DECISIONS_API_KEY;
+  else process.env.OPENAI_DECISIONS_API_KEY = previousDecisionsKey;
   if (previousHome === undefined) delete process.env.PI_CODING_AGENT_DIR;
   else process.env.PI_CODING_AGENT_DIR = previousHome;
   await rm(home, { recursive: true, force: true });

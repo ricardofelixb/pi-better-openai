@@ -7,6 +7,28 @@
 - Adapt the Tailscale lookup of an SSH connection from [`herdr-codex-voice`](https://github.com/ricardofelixb/herdr-codex-voice) (MIT; see `THIRD_PARTY_NOTICES.md`).
 - Add experimental live voice from a phone through [Ovis](https://github.com/ricardofelixb/ovis): inside a Herdr pane in the TUI, Pi listens on a private per-process socket (`~/.pi/agent/live-bridge/<pid>.sock`) where Ovis starts and ends `/live` and the phone's browser is the microphone and speaker. The Codex login, realtime session, and delegation stay in Pi, and no credential crosses the socket. It follows `live.enabled`, adds no setting, and leaves terminal `/live` and `live.audioHost` unchanged.
 
+## 0.3.3
+
+- Add GPT-6.1 Terra to native OpenAI and legacy Codex model catalogs while preserving host authentication, transports, classifiers, and authoritative metadata. Use the documented 1.05M context for OpenAI and a conservative 272K context for Codex.
+- Enable Terra in the default Fast model list, migrate prior seeded defaults, and cover subscription visibility and catalog precedence. Ultrafast remains limited to existing supported models.
+
+## 0.3.2
+
+- Allow `/openai-tier ultrafast` directly for OpenAI subscription OAuth on supported Astra/Sol endpoints, without an extra setting or unverified-support warning. Preserve API-key pricing notices and existing model/endpoint restrictions.
+
+## 0.3.1
+
+- Add argument autocomplete for `/openai-tier` and `/openai-decisions`, including live registered classifier suggestions after `use`. Completion does not change settings or call providers.
+
+## 0.3.0
+
+- Add the classifier-only `openai-decisions` provider for API-billed Decisions alongside subscription-authenticated `openai` chat. Use `/login openai-decisions`, `OPENAI_DECISIONS_API_KEY`, or `OPENAI_API_KEY`; native adapters and chat credentials are preserved.
+- Remove the legacy `/fast` command and `--fast` flag; use `/openai-tier fast` or `/openai-tier standard`. Existing saved tier settings still load.
+- Enable API-key Ultrafast for GPT-6.1 Sol on global, US, and EU Responses endpoints; retain Astra's global/US restriction and subscription-auth safeguards.
+- Document generally available OpenAI Decisions and direct `openai/gpt-6-astra` selection, preserving native chat, classifier, and authentication implementations.
+- Add regression coverage for Sol Ultrafast eligibility and direct OpenAI model access alongside the legacy Codex provider.
+- Upgrade undici to 8.12.2 and pin patched Vite 8.2.4 to address high-severity security advisories.
+
 ## 0.2.13
 
 - Add a native OpenAI Decisions compatibility classifier for hosts without upstream support, preserving OpenAI chat/auth and deferring to the host adapter when available.
