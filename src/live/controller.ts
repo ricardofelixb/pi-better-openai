@@ -236,10 +236,11 @@ export class LiveSessionController {
       },
     });
     this.#transport = transport;
+    // before connecting, which is what opens the microphone: a muted call is never heard unmuted
+    transport.setMuted(this.#muted);
     await transport.connect();
     if (this.#stopped)
       throw this.#failure ?? new Error("The live session stopped while connecting.");
-    transport.setMuted(this.#muted);
     this.#sessionStartedAt ??= Date.now();
     this.#sessionLive = true;
     this.#touch();

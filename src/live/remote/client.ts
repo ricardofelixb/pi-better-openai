@@ -70,7 +70,7 @@ export function createParkableMediaFactory(
 ): LiveMediaFactory {
   let media: RemoteLiveMedia | undefined;
   return (callbacks) => {
-    if (!media) return (media = new RemoteLiveMedia(spawn(), callbacks, timeouts));
+    if (!media) return (media = new RemoteLiveMedia(spawn(), callbacks, timeouts, undefined, true));
     media.resume(callbacks);
     return media;
   };
@@ -104,6 +104,7 @@ class RemoteLiveMedia implements LiveMedia {
   #helloSeen = false;
   #nextId = 1;
   #closed = false;
+  readonly #parkable: boolean;
   #parked = false;
   #exitedAlready = false;
   #reported = false;
@@ -117,8 +118,10 @@ class RemoteLiveMedia implements LiveMedia {
     callbacks: LiveMediaCallbacks,
     timeouts: RemoteMediaOptions,
     signal?: AbortSignal,
+    parkable = false,
   ) {
     this.#process = child;
+    this.#parkable = parkable;
     this.#callbacks = callbacks;
     this.#handshakeMs = timeouts.handshakeMs ?? DEFAULT_HANDSHAKE_TIMEOUT_MS;
     this.#requestMs = timeouts.requestMs ?? DEFAULT_REQUEST_TIMEOUT_MS;
@@ -221,8 +224,10 @@ class RemoteLiveMedia implements LiveMedia {
   /**
    * Has the host drop its peer connection and levels while keeping its microphone and the
    * connection to Pi. Nothing it says meanwhile reaches a session, and a failure ends the media.
+   * A host that cannot park (the companion ignores the frame) is closed, for the next to replace.
    */
   async park(): Promise<void> {
+    if (!this.#parkable) return this.close();
     if (this.#closed || this.#parked) return;
     this.#parked = true;
     this.#callbacks = NO_CALLBACKS;
