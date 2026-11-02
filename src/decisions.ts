@@ -14,6 +14,7 @@ import {
   type ResolvedConfig,
 } from "./config.ts";
 import { registerOptionalTool, type OptionalTool } from "./optional-tool.ts";
+import { openAIDecisionsArgumentCompletions } from "./command-completions.ts";
 
 export const OPENAI_DECIDE_TOOL = "openai_decide";
 export const OPENAI_DECISIONS_COMMAND = "openai-decisions";
@@ -337,6 +338,11 @@ export function registerOpenAIDecisions(
   getConfig: (ctx: ExtensionContext) => ResolvedConfig,
   refreshConfig: (ctx: ExtensionContext) => ResolvedConfig,
 ): OptionalTool {
+  let modelRegistry: ExtensionContext["modelRegistry"] | undefined;
+  pi.on("session_start", (_event, ctx) => {
+    modelRegistry = ctx.modelRegistry;
+  });
+
   function save(ctx: ExtensionContext, patch: DecisionsConfig): void {
     const cfg = refreshConfig(ctx);
     const raw = readRawConfig(cfg.configPath);
@@ -349,6 +355,11 @@ export function registerOpenAIDecisions(
 
   pi.registerCommand(OPENAI_DECISIONS_COMMAND, {
     description: "Configure opt-in native decisions: models | use provider/model | off",
+    getArgumentCompletions: (prefix) =>
+      openAIDecisionsArgumentCompletions(
+        prefix,
+        () => modelRegistry?.getModelsOfType("classifier") ?? [],
+      ),
     handler: async (args, ctx) => {
       const arg = args.trim();
       if (arg === "off") {
@@ -381,7 +392,7 @@ export function registerOpenAIDecisions(
       } else if (!arg) {
         const cfg = getConfig(ctx).decisions;
         ctx.ui.notify(
-          `Decisions: ${cfg.enabled ? "enabled" : "disabled"}; model: ${cfg.model || "not selected"}; timeout: ${cfg.timeoutMs}ms.\n/openai-decisions models | use provider/model | off\nOpenAI Decisions: openai/gpt-6-luna requires an OpenAI API key (not ChatGPT/Codex OAuth).`,
+          `Decisions: ${cfg.enabled ? "enabled" : "disabled"}; model: ${cfg.model || "not selected"}; timeout: ${cfg.timeoutMs}ms.\n/openai-decisions models | use provider/model | off\nOpenAI Decisions: use openai-decisions/gpt-6-luna for API-key billing alongside openai subscription chat. Configure /login openai-decisions or OPENAI_DECISIONS_API_KEY (fallback: OPENAI_API_KEY).`,
           "info",
         );
       } else {
@@ -393,7 +404,7 @@ export function registerOpenAIDecisions(
     name: OPENAI_DECIDE_TOOL,
     label: "Typed decision",
     description:
-      "Answer bounded choice, bool, or score questions using the user's explicitly configured native classifier. Disabled until opt-in. Supports OpenAI Decisions (openai/gpt-6-luna, API key only) and other Pi classifiers including Jev. Never uses a chat fallback or executes decisions.",
+      "Answer bounded choice, bool, or score questions using the user's explicitly configured native classifier. Disabled until opt-in. Supports OpenAI Decisions (openai-decisions/gpt-6-luna for separate API-key billing, or openai/gpt-6-luna with API-key login) and other Pi classifiers including Jev. Never uses a chat fallback or executes decisions.",
     parameters: DECISION_PARAMETERS,
     outputSchema: DECISION_OUTPUT,
     promptGuidelines: [
