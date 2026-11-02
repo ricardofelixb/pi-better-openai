@@ -145,7 +145,9 @@ Example config:
   "live": {
     "enabled": true,
     "voice": "sol",
-    "audioHost": ""
+    "audioHost": "",
+    "idleHangupSeconds": 120,
+    "parkAfterSeconds": 20
   },
   "pets": {
     "enabled": false,
@@ -263,8 +265,17 @@ Run `/live` or press `Ctrl+Shift+L` to open the realtime voice panel. `Ctrl+L` r
 
 - `Space` toggles microphone mute.
 - `Escape`, `Ctrl+C`, or `Ctrl+Shift+L` ends the call.
-- The waveform reacts to microphone RMS level and the panel footer shows connecting, listening, working, speaking, muted, or error state.
+- The waveform reacts to microphone RMS level and the panel footer shows connecting, listening, working, speaking, muted, parked, or error state, and how long the call has been connected.
 - The voice starts out knowing the session's recent chat (its text turns, without tool output, up to about 6,000 tokens), and hears what is typed during the call without reading it out. Streaming speech transcripts show in the live panel, and when the call ends what was said is saved to the session as a `Live call` message. Coding and repository requests are delegated into the current pi agent session; normal tool and assistant output continues in the transcript, and the final result is spoken back through the live session.
+
+### What a call costs
+
+A Live call draws on your Codex plan by the second it is connected: about half a point of a Plus plan's 5-hour window per minute (measured with `scripts/live-usage-bench.ts`). Speaking, muting, the size of the chat the voice starts out with, and the work it delegates change nothing; only being connected does. So a call that sits open costs as much as one that is busy, and two things keep it from doing that:
+
+- **Idle hang-up.** When nobody has spoken, the voice has said nothing and no delegated task is running for `live.idleHangupSeconds` (default 120, `0` turns it off), the call ends as if you had hung up. This applies wherever the audio is: this computer, a remote audio computer, and phones.
+- **Parking.** When a delegated task has run `live.parkAfterSeconds` (default 20, `0` turns it off) with nobody speaking, the voice session is closed, which stops the meter, while the call itself stays: the panel reads `parked` and the microphone, or the phone's connection, stays ready. When the task finishes, a fresh session opens, starts out knowing the chat as it now stands, and says the result. Press `r` in the panel (or `resume` on a phone) to bring the voice back before the task is done. Time spent parked is not idle time, and the idle limit starts over once the result has been spoken. Parking on this computer's own audio device, or one reached over SSH, closes and reopens the microphone; a phone is parked only if it says it can (see the developer notes).
+
+The panel footer shows how long the call has been connected, and when it ends a notice reads, for example, `Live call: 3m 12s connected · 5-hour window 12% → 14%`. The connected time is the server's own count; the window figures come from the plan's usage meter, which updates only every minute or so and in whole percents, so a short call may show no movement.
 
 Choose the spoken voice under **Live voice** in `/openai-settings`. Supported values are `arbor`, `breeze`, `cove`, `ember`, `juniper`, `maple`, `sol`, `spruce`, and `vale`.
 
