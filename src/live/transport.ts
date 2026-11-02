@@ -39,6 +39,8 @@ type LiveSignalingResult = {
 export interface LiveTransportCallbacks {
   onEvent(event: LiveServerEvent): void;
   onLevels(input: number, output: number): void;
+  /** Every server payload as received, before parsing drops what the client does not use. */
+  onRawEvent?(source: "sideband" | "peer", payload: string): void;
 }
 
 export interface LiveTransportOptions {
@@ -350,6 +352,7 @@ export class CodexLiveTransport {
 
   #handleSidebandEvent(payload: string): void {
     if (this.#state === "closing" || this.#state === "closed") return;
+    this.#reportRawEvent("sideband", payload);
     const event = parseLiveServerEvent(payload);
     if (!event) return;
     try {
@@ -359,8 +362,17 @@ export class CodexLiveTransport {
     }
   }
 
+  #reportRawEvent(source: "sideband" | "peer", payload: string): void {
+    try {
+      this.#options.callbacks.onRawEvent?.(source, payload);
+    } catch {
+      // Diagnostics never affect the call.
+    }
+  }
+
   #handleServerEvent(payload: string): void {
     if (this.#state === "closing" || this.#state === "closed") return;
+    this.#reportRawEvent("peer", payload);
     const event = parseLiveServerEvent(payload);
     if (!event || (this.#sideband?.readyState === WebSocket.OPEN && event.type !== "error")) return;
     try {
