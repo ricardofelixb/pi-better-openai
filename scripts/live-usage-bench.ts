@@ -2,8 +2,12 @@
 // call fed scripted speech, hands delegations to a local pi model, and logs every raw server event
 // and the plan meter. Usage:
 //   node scripts/live-usage-bench.ts <scenario> [--minutes 10] [--out dir] [--model strata/qwen3.8-flash-next]
+//     [--lines n] [--idle seconds] [--park seconds]
 // Scenarios: baseline (no call), silent (room noise), muted (muted after connecting), nopush
-// (connected, no audio sent), talk, talk-bigctx, talk-nocommentary.
+// (connected, no audio sent), talk, talk-bigctx, talk-nocommentary, and the ones that check what
+// keeps a call cheap: idle (two lines, then silence: the call must hang up by itself), park (one
+// task that runs a minute: the session closes while it runs and a fresh one says the result),
+// park-resume (the same, resumed by hand while the task still runs).
 // Needs `piper` on PATH and PIPER_VOICE pointing at an .onnx voice.
 import { spawn, spawnSync } from "node:child_process";
 import { appendFileSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
@@ -24,6 +28,9 @@ const SCENARIOS = [
   "talk",
   "talk-bigctx",
   "talk-nocommentary",
+  "idle",
+  "park",
+  "park-resume",
 ] as const;
 type Scenario = (typeof SCENARIOS)[number];
 
@@ -33,6 +40,7 @@ const NOISE_LEVEL = 0.002;
 const METER_INTERVAL_MS = 30_000;
 const TURN_GAP_MS = 8_000;
 const BIG_CHAT_CHARS = 56_000;
+const RESUME_AFTER_MS = 30_000;
 
 // The same lines, in order, for every talk scenario, so their costs compare.
 const SCRIPT = [
@@ -45,6 +53,10 @@ const SCRIPT = [
   "Is there a changelog in the repo? What's the latest entry?",
 ];
 
+// A task that takes a minute whatever model runs it, so the call has time to park meanwhile.
+const PARK_LINE =
+  "Please use your tools to run this shell command: sleep 60 && ls tests | wc -l. Then tell me what it printed.";
+
 function argValue(name: string, fallback: string): string {
   const index = process.argv.indexOf(name);
   return index >= 0 && process.argv[index + 1] ? process.argv[index + 1]! : fallback;
@@ -56,6 +68,10 @@ if (!SCENARIOS.includes(scenario)) {
   process.exit(2);
 }
 const minutes = Number(argValue("--minutes", "10"));
+const parking = scenario === "park" || scenario === "park-resume";
+// the quiet limits of the call: off for the older scenarios, so their costs stay comparable
+const idleSeconds = Number(argValue("--idle", scenario === "idle" ? "120" : parking ? "45" : "0"));
+const parkSeconds = Number(argValue("--park", parking ? "20" : "0"));
 const model = argValue("--model", "strata/qwen3.8-flash-next");
 const repo = resolve(argValue("--repo", process.cwd()));
 const stamp = new Date().toISOString().replaceAll(/[:.]/g, "-");
@@ -216,12 +232,17 @@ async function runCall(): Promise<void> {
   let phase: LivePhase = "connecting";
   let lastAssistantDone = 0;
   let delegations = 0;
+  let parks = 0;
+  let billedSeconds = 0;
+  let terminalAt: number | undefined;
   let backend: ReturnType<typeof spawn> | undefined;
-  const talking = scenario.startsWith("talk");
+  const talking = scenario.startsWith("talk") || scenario === "idle";
   const dropCommentary = scenario === "talk-nocommentary";
-  const lines = talking
-    ? SCRIPT.map((text, index) => ({ text, samples: speech(text, index) }))
-    : [];
+  const script = parking
+    ? [PARK_LINE]
+    : SCRIPT.slice(0, Number(argValue("--lines", scenario === "idle" ? "2" : "99")));
+  const lines =
+    talking || parking ? script.map((text, index) => ({ text, samples: speech(text, index) })) : [];
   let terminal: ((error?: Error) => void) | undefined;
   const ended = new Promise<Error | undefined>((resolveEnd) => (terminal = resolveEnd));
 
@@ -229,6 +250,8 @@ async function runCall(): Promise<void> {
     sessionId: crypto.randomUUID(),
     getCredentials: (signal) => getCodexCredentials(undefined, signal),
     chat: scenario === "talk-bigctx" ? bigChat() : "",
+    idleHangupSeconds: idleSeconds,
+    parkAfterSeconds: parkSeconds,
     native,
     resolveMedia: async () => (callbacks) => (media = new ScriptedMedia(native, callbacks)),
     createTransport: (options) => {
@@ -310,6 +333,19 @@ async function runCall(): Promise<void> {
       onPhase: (next) => {
         phase = next;
         log("phases.jsonl", { phase: next });
+        if (next === "parked") {
+          parks += 1;
+          if (scenario === "park-resume") {
+            setTimeout(() => {
+              log("phases.jsonl", { phase: "resume-requested" });
+              controller.resume();
+            }, RESUME_AFTER_MS);
+          }
+        }
+      },
+      onUsage: (seconds) => {
+        billedSeconds = seconds;
+        log("billed.jsonl", { seconds });
       },
       onLevels: () => undefined,
       onTranscript: (transcript) => {
@@ -318,7 +354,10 @@ async function runCall(): Promise<void> {
         log("transcript.jsonl", { ...transcript });
         console.log(`[${elapsed()}s] ${transcript.role}: ${transcript.text}`);
       },
-      onTerminal: (error) => terminal?.(error),
+      onTerminal: (error) => {
+        terminalAt = elapsed();
+        terminal?.(error);
+      },
     },
   });
 
@@ -351,6 +390,16 @@ async function runCall(): Promise<void> {
     connectedSeconds,
     linesSpoken: next,
     delegations,
+    idleSeconds,
+    parkSeconds,
+    parks,
+    billedSeconds,
+    // how long after the last line's reply the call hung up by itself, for the idle scenario
+    endedBySelf: terminalAt !== undefined,
+    terminalAt,
+    lastAssistantDoneAt: lastAssistantDone
+      ? Math.round((lastAssistantDone - startedAt) / 100) / 10
+      : undefined,
     speechSeconds: Math.round(media?.speechSeconds ?? 0),
     noiseSeconds: Math.round(media?.noiseSeconds ?? 0),
     sentMessages,
