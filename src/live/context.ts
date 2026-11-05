@@ -1,6 +1,8 @@
 // What the voice knows of the pane's text chat. GPT-Live's Codex endpoint rejects `session.input`
 // (measured: "Unknown parameter: 'input'"), so the chat so far goes into the instructions, under a
-// heading of its own, and what is typed during the call goes in as silent context.
+// heading of its own. The endpoint does not act on the instructions either (measured: a rule in them
+// is not followed, the same text as session context is), so the controller sends them as silent
+// context too. What is typed during the call goes in as silent context.
 
 export const LIVE_DELEGATION_MESSAGE_TYPE = "better-openai-live-delegation";
 export const LIVE_TRANSCRIPT_MESSAGE_TYPE = "better-openai-live-transcript";
@@ -9,6 +11,9 @@ export const LIVE_TRANSCRIPT_HEADING = "Live voice call:";
 
 /** About 6,000 tokens of chat, well inside the 16,384 the instructions may take. */
 export const LIVE_HISTORY_BUDGET = 24_000;
+/** The newest turns the voice reads first: at most this many turns, in about this many characters. */
+export const LIVE_STAND_TURNS = 4;
+export const LIVE_STAND_BUDGET = 1_500;
 /** One message typed during the call, before it is cut. */
 export const LIVE_TYPED_BUDGET = 2_000;
 
@@ -55,15 +60,14 @@ function entryLine(entry: unknown): string | undefined {
 }
 
 /**
- * The newest lines that fit `budget` characters, oldest first. The newest alone too long loses its
- * start; an older line that does not fit ends the history there.
+ * The newest of `lines` that fit `budget` characters, and `limit` lines, oldest first. The newest
+ * alone too long loses its start; an older line that does not fit ends the history there.
  */
-export function recentChat(entries: readonly unknown[], budget = LIVE_HISTORY_BUDGET): string {
+function newest(lines: readonly string[], budget: number, limit = Infinity): string {
   const kept: string[] = [];
   let left = budget;
-  for (let index = entries.length - 1; index >= 0; index -= 1) {
-    const line = entryLine(entries[index]);
-    if (!line) continue;
+  for (let index = lines.length - 1; index >= 0 && kept.length < limit; index -= 1) {
+    const line = lines[index]!;
     if (line.length > left) {
       if (kept.length === 0) kept.push(`…${line.slice(line.length - left + 1)}`);
       break;
@@ -74,13 +78,40 @@ export function recentChat(entries: readonly unknown[], budget = LIVE_HISTORY_BU
   return kept.reverse().join("\n\n");
 }
 
-/** The session's instructions with the chat so far after them, when there is any. */
+/** The newest lines of the chat that fit `budget` characters, oldest first. */
+export function recentChat(entries: readonly unknown[], budget = LIVE_HISTORY_BUDGET): string {
+  return newest(
+    entries.flatMap((entry) => entryLine(entry) ?? []),
+    budget,
+  );
+}
+
+// where a turn of `recentChat` begins; a turn of several paragraphs stays whole
+const TURN_START =
+  /\n\n(?=(?:User(?: \(by voice\))?|Assistant): |Summary of the earlier conversation: |Live voice call:)/;
+
+/**
+ * The session's instructions with the chat so far after them, when any, in the structure OpenAI's
+ * voice prompting guide gives long context: the current state first, the older history marked as
+ * background that loses to it.
+ * https://developers.openai.com/api/docs/guides/voice-prompting
+ */
 export function withChat(instructions: string, chat: string): string {
   if (!chat) return instructions;
+  const stand = newest(chat.split(TURN_START), LIVE_STAND_BUDGET, LIVE_STAND_TURNS);
   return `${instructions}
 
-# Conversation so far
-Background from this session's text chat before the call, oldest first. Use it to follow what the user refers to. It is not a new request, and the latest turns are the current state.
+## Context
+
+### Current State
+- **Latest known state:** the newest turns of this session's chat, oldest first. What the user says next is about them unless they say otherwise.
+
+${stand}
+
+### Historical or Background Sources
+- **Source:** this session's text chat before the call, oldest first, ending with the turns in Current State. Your own memory, not a new request.
+- **Status:** background
+- **Note:** Do not use for current decisions if it conflicts with Current State.
 
 ${chat}`;
 }

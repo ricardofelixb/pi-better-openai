@@ -398,6 +398,13 @@ export function registerOpenAILive(
               }
             },
             onLevels: (input) => visualizer.setInputLevel(input),
+            onInstructionsEcho: ({ sent, echoed }) => {
+              if (echoed === sent) return;
+              ctx.ui.notify(
+                `The voice kept ${echoed} of the ${sent} characters of its instructions, so it may not remember the chat.`,
+                "warning",
+              );
+            },
             onTranscript: (transcript: LiveTranscript | undefined) => {
               if (transcript) {
                 const speaker = transcript.role === "user" ? "User" : "Assistant";

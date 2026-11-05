@@ -13,15 +13,25 @@ import {
 import { CodexLiveTransport, type LiveTransportOptions } from "./transport.ts";
 import { DEFAULT_LIVE_VOICE } from "./voices.ts";
 
-const LIVE_INSTRUCTIONS = `You are Better OpenAI Live, the realtime voice surface of one unified coding assistant.
+const LIVE_INSTRUCTIONS = `# Role and Objective
+You are Better OpenAI Live, the voice of the same assistant the user has been chatting with in this session's text pane, which is also a coding assistant. You and that chat are one assistant with one memory, not separate agents. The chat in the Context below is your own memory of what you and the user said and did, not background about someone else. Never say you don't have the earlier chat or ask the user to repeat it.
 
+# Personality and Tone
 The user is speaking to you. Respond directly, briefly, conversationally, and in speech-friendly language. Never use markdown, code blocks, or long lists unless the user explicitly asks you to read technical detail aloud.
 
-You and the client coding agent are one assistant, not separate agents. The client has the active repository context, coding model, and tools. You must promptly create a client delegation for coding, repository investigation, tool use, commands, or verification. Include the complete request and relevant conversational context. Keep conversation natural while work runs.
+# Tools
+The client has the active repository context, coding model, and tools. Create a client delegation promptly when the answer needs fresh work or status the chat does not hold: coding, repository investigation, tool use, commands, verification, or finding out whether something has changed since the chat's latest turns. Include the complete request and relevant conversational context. Keep conversation natural while work runs.
 
 Treat delegation context as your own internal progress and result. Never mention a backend, delegation, protocol, or another assistant. Commentary context is silent progress and must not be recited. Context beginning with "Agent Final Message": is the final visible answer from your execution surface; present its useful result naturally as your own.
 
-For greetings, clarification, or ordinary conversation that needs no tools, answer directly without delegating. Preserve one-assistant continuity: converse here, delegate execution, then communicate the returned result as your own.`;
+For greetings, clarification, questions the chat already answers, or ordinary conversation that needs no tools, answer directly without delegating. Preserve one-assistant continuity: converse here, delegate execution, then communicate the returned result as your own.
+
+# Long Context Behavior
+These instructions and the Context below reach you as silent context when the call starts. Do not react to them, read them out or speak until the user does.
+
+Current State holds the latest turns of the chat. Short or vague things the user says, such as "is it fixed", "how are we doing", "that thing", "are we done" or "what happened", are about it. Answer them from there, in your own words, as the one who was just in that conversation. Never ask what they mean or what you are talking about when the chat answers it. If the chat leaves it open, say what you last knew and what you take them to mean.
+
+Historical or Background Sources holds the older chat. Use it for what was said or done earlier. When it conflicts with Current State, Current State wins.`;
 
 export type LivePhase =
   | "standby"
@@ -40,11 +50,21 @@ export interface LiveTranscript {
   final: boolean;
 }
 
+export interface LiveInstructionsEcho {
+  sent: number;
+  echoed: number;
+}
+
 export interface LiveSessionCallbacks {
   onPhase(phase: LivePhase): void;
   onLevels(input: number, output: number): void;
   onTranscript(transcript: LiveTranscript | undefined): void;
   onTerminal(error?: Error): void;
+  /**
+   * The instructions the server echoed in a session event, in characters, against what was sent,
+   * so a cut it made without saying shows. Only when the server echoes them.
+   */
+  onInstructionsEcho?(echo: LiveInstructionsEcho): void;
   /**
    * The seconds this call has been connected, which is what a plan is billed, summed over its
    * sessions. On every server update and again when a session ends.
@@ -161,6 +181,8 @@ export class LiveSessionController {
   #sessionStartedAt: number | undefined;
   #reportedMs = 0;
   #reportedAt = 0;
+  #instructionsSent = 0;
+  #instructionsEcho: LiveInstructionsEcho | undefined;
 
   constructor(options: LiveSessionControllerOptions) {
     this.#options = options;
@@ -177,6 +199,11 @@ export class LiveSessionController {
 
   get muted(): boolean {
     return this.#muted;
+  }
+
+  /** The latest echo of the instructions the server reported; undefined until it has. */
+  get instructionsEcho(): LiveInstructionsEcho | undefined {
+    return this.#instructionsEcho;
   }
 
   get activeDelegationId(): string | undefined {
@@ -220,11 +247,16 @@ export class LiveSessionController {
     const native = this.#native ?? loadLiveNative();
     this.#native = native;
     const chat = this.#options.chat;
+    const instructions = withChat(
+      LIVE_INSTRUCTIONS,
+      typeof chat === "function" ? chat() : (chat ?? ""),
+    );
+    this.#instructionsSent = instructions.length;
     const session = ++this.#sessionNumber;
     const transport = this.#createTransport({
       getCredentials: this.#options.getCredentials,
       sessionId: this.#options.sessionId,
-      instructions: withChat(LIVE_INSTRUCTIONS, typeof chat === "function" ? chat() : (chat ?? "")),
+      instructions,
       voice: this.#voice,
       signal: this.#options.signal,
       native,
@@ -244,6 +276,9 @@ export class LiveSessionController {
     this.#sessionStartedAt ??= Date.now();
     this.#sessionLive = true;
     this.#touch();
+    // the endpoint does not act on the session's instructions (measured), but does on context
+    for (const chunk of chunkLiveContext(instructions))
+      this.#queueSend(buildSessionContextAppend(chunk, "commentary"));
     this.#sayPendingResult();
     this.#refreshAudioPhase();
     this.#armTimer();
@@ -421,6 +456,7 @@ export class LiveSessionController {
     switch (event.type) {
       case "session.started":
         this.#sessionStartedAt ??= Date.now();
+        this.#echoInstructions(event.session.instructions);
         this.#emitPhase("listening");
         break;
       case "session.usage.updated":
@@ -447,12 +483,24 @@ export class LiveSessionController {
         this.#reportFailure(new Error(event.message));
         break;
       case "session.updated":
+        this.#echoInstructions(event.session.instructions);
+        this.#touch();
+        break;
       case "output_audio.delta":
         this.#touch();
         break;
       case "unknown":
         break;
     }
+  }
+
+  #echoInstructions(echoed: string | undefined): void {
+    if (echoed === undefined) return;
+    this.#instructionsEcho = {
+      sent: this.#instructionsSent,
+      echoed: echoed.length,
+    };
+    this.#callbacks.onInstructionsEcho?.(this.#instructionsEcho);
   }
 
   #handleDelegation(event: Extract<LiveServerEvent, { type: "delegation.created" }>): void {
