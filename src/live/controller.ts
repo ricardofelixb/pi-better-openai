@@ -42,11 +42,21 @@ export interface LiveTranscript {
   final: boolean;
 }
 
+export interface LiveInstructionsEcho {
+  sent: number;
+  echoed: number;
+}
+
 export interface LiveSessionCallbacks {
   onPhase(phase: LivePhase): void;
   onLevels(input: number, output: number): void;
   onTranscript(transcript: LiveTranscript | undefined): void;
   onTerminal(error?: Error): void;
+  /**
+   * The instructions the server echoed in a session event, in characters, against what was sent,
+   * so a cut it made without saying shows. Only when the server echoes them.
+   */
+  onInstructionsEcho?(echo: LiveInstructionsEcho): void;
   /**
    * The seconds this call has been connected, which is what a plan is billed, summed over its
    * sessions. On every server update and again when a session ends.
@@ -163,6 +173,8 @@ export class LiveSessionController {
   #sessionStartedAt: number | undefined;
   #reportedMs = 0;
   #reportedAt = 0;
+  #instructionsSent = 0;
+  #instructionsEcho: LiveInstructionsEcho | undefined;
 
   constructor(options: LiveSessionControllerOptions) {
     this.#options = options;
@@ -179,6 +191,11 @@ export class LiveSessionController {
 
   get muted(): boolean {
     return this.#muted;
+  }
+
+  /** The latest echo of the instructions the server reported; undefined until it has. */
+  get instructionsEcho(): LiveInstructionsEcho | undefined {
+    return this.#instructionsEcho;
   }
 
   get activeDelegationId(): string | undefined {
@@ -222,11 +239,16 @@ export class LiveSessionController {
     const native = this.#native ?? loadLiveNative();
     this.#native = native;
     const chat = this.#options.chat;
+    const instructions = withChat(
+      LIVE_INSTRUCTIONS,
+      typeof chat === "function" ? chat() : (chat ?? ""),
+    );
+    this.#instructionsSent = instructions.length;
     const session = ++this.#sessionNumber;
     const transport = this.#createTransport({
       getCredentials: this.#options.getCredentials,
       sessionId: this.#options.sessionId,
-      instructions: withChat(LIVE_INSTRUCTIONS, typeof chat === "function" ? chat() : (chat ?? "")),
+      instructions,
       voice: this.#voice,
       signal: this.#options.signal,
       native,
@@ -423,6 +445,7 @@ export class LiveSessionController {
     switch (event.type) {
       case "session.started":
         this.#sessionStartedAt ??= Date.now();
+        this.#echoInstructions(event.session.instructions);
         this.#emitPhase("listening");
         break;
       case "session.usage.updated":
@@ -449,12 +472,21 @@ export class LiveSessionController {
         this.#reportFailure(new Error(event.message));
         break;
       case "session.updated":
+        this.#echoInstructions(event.session.instructions);
+        this.#touch();
+        break;
       case "output_audio.delta":
         this.#touch();
         break;
       case "unknown":
         break;
     }
+  }
+
+  #echoInstructions(echoed: string | undefined): void {
+    if (echoed === undefined) return;
+    this.#instructionsEcho = { sent: this.#instructionsSent, echoed: echoed.length };
+    this.#callbacks.onInstructionsEcho?.(this.#instructionsEcho);
   }
 
   #handleDelegation(event: Extract<LiveServerEvent, { type: "delegation.created" }>): void {

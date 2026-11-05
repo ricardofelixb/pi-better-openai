@@ -674,6 +674,16 @@ describe("what a call costs", () => {
     }
   });
 
+  test("warns when the server kept less of the voice's instructions than were sent", async () => {
+    const { notify, end } = await localCall((options) => {
+      options.callbacks.onInstructionsEcho?.({ sent: 9_000, echoed: 9_000 });
+      options.callbacks.onInstructionsEcho?.({ sent: 9_000, echoed: 4_096 });
+    });
+    expect(notify).toHaveBeenCalledOnce();
+    expect(notify).toHaveBeenCalledWith(expect.stringContaining("4096 of the 9000"), "warning");
+    await end();
+  });
+
   test("says nothing of a call that never connected", async () => {
     const { notify, end } = await localCall(() => undefined);
     await end();
