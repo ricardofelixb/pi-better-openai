@@ -57,9 +57,9 @@ describe("withChat", () => {
   test("puts the newest turns first, then the whole history after them", () => {
     const chat = turns(8).join("\n\n");
     const text = withChat("Be brief.", chat);
-    const [instructions, rest] = text.split("# Where things stand");
-    const [stand, history] = rest!.split("# Conversation so far");
-    expect(instructions).toBe("Be brief.\n\n");
+    const [before, rest] = text.split("### Current State");
+    const [stand, history] = rest!.split("### Historical or Background Sources");
+    expect(before).toBe("Be brief.\n\n## Context\n\n");
     expect(stand).toContain(
       "User: question 4\n\nAssistant: answer 5\n\nUser: question 6\n\nAssistant: answer 7",
     );
@@ -75,7 +75,7 @@ describe("withChat", () => {
       "User: three",
       "Assistant: four\n\nstill four\n\nand more four",
     ].join("\n\n");
-    const stand = withChat("x", chat).split("# Conversation so far")[0]!;
+    const stand = withChat("x", chat).split("### Historical or Background Sources")[0]!;
     expect(stand).toContain("User: one");
     expect(stand).toContain("Assistant: four\n\nstill four\n\nand more four");
   });
@@ -85,16 +85,16 @@ describe("withChat", () => {
       "\n\n",
     );
     const stand = withChat("x", chat)
-      .split("# Where things stand")[1]!
-      .split("# Conversation so far")[0]!;
+      .split("### Current State")[1]!
+      .split("### Historical or Background Sources")[0]!;
     expect(stand).toContain("b".repeat(900));
     expect(stand).not.toContain("a".repeat(900));
     expect(stand).not.toContain("User: old");
     expect(stand.length).toBeLessThan(1_800);
 
     const huge = withChat("x", `User: ${"c".repeat(5_000)}`)
-      .split("# Where things stand")[1]!
-      .split("# Conversation so far")[0]!;
+      .split("### Current State")[1]!
+      .split("### Historical or Background Sources")[0]!;
     expect(huge).toContain(`…${"c".repeat(100)}`);
     expect(huge.length).toBeLessThan(1_800);
   });

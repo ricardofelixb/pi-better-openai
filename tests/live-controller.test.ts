@@ -169,7 +169,7 @@ describe("LiveSessionController", () => {
     });
 
     await controller.start();
-    expect(transportOptions?.instructions).toContain("# Conversation so far");
+    expect(transportOptions?.instructions).toContain("### Historical or Background Sources");
     expect(transportOptions?.instructions).toContain("User: My dog is called Biscuit.");
 
     controller.handleAgentMessage({ role: "user", content: "Run the build." });
@@ -309,11 +309,22 @@ describe("LiveSessionController", () => {
     // the one-assistant and delegation rules stay
     expect(instructions).toContain("one assistant");
     expect(instructions).toContain("delegation");
-    expect(instructions.indexOf("# Where things stand")).toBeGreaterThan(
-      instructions.indexOf("Never ask what they mean"),
-    );
-    expect(instructions.indexOf("# Where things stand")).toBeLessThan(
-      instructions.indexOf("# Conversation so far"),
+    // the guide's labeled sections, then its context pattern: current state, then background
+    const at = (heading: string) => instructions.indexOf(heading);
+    for (const heading of [
+      "# Role and Objective",
+      "# Personality and Tone",
+      "# Tools",
+      "# Long Context Behavior",
+      "## Context",
+    ])
+      expect(at(heading), heading).toBeGreaterThanOrEqual(0);
+    expect(at("# Long Context Behavior")).toBeLessThan(at("## Context"));
+    expect(at("## Context")).toBeLessThan(at("### Current State"));
+    expect(instructions).toContain("Current State wins");
+    expect(at("### Current State")).toBeGreaterThan(at("Never ask what they mean"));
+    expect(instructions.indexOf("### Current State")).toBeLessThan(
+      instructions.indexOf("### Historical or Background Sources"),
     );
     await controller.stop();
   });

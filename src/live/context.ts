@@ -90,19 +90,28 @@ export function recentChat(entries: readonly unknown[], budget = LIVE_HISTORY_BU
 const TURN_START =
   /\n\n(?=(?:User(?: \(by voice\))?|Assistant): |Summary of the earlier conversation: |Live voice call:)/;
 
-/** The session's instructions with the chat so far after them, newest turns first, when any. */
+/**
+ * The session's instructions with the chat so far after them, when any, in the structure OpenAI's
+ * voice prompting guide gives long context: the current state first, the older history marked as
+ * background that loses to it.
+ * https://developers.openai.com/api/docs/guides/voice-prompting
+ */
 export function withChat(instructions: string, chat: string): string {
   if (!chat) return instructions;
   const stand = newest(chat.split(TURN_START), LIVE_STAND_BUDGET, LIVE_STAND_TURNS);
   return `${instructions}
 
-# Where things stand
-The latest turns of this session's chat, which is the state of the conversation right now. What the user says next is about this unless they say otherwise.
+## Context
+
+### Current State
+- **Latest known state:** the newest turns of this session's chat, oldest first. What the user says next is about them unless they say otherwise.
 
 ${stand}
 
-# Conversation so far
-Your own memory of this session's text chat before the call, oldest first, ending with the turns above. It is not a new request.
+### Historical or Background Sources
+- **Source:** this session's text chat before the call, oldest first, ending with the turns in Current State. Your own memory, not a new request.
+- **Status:** background
+- **Note:** Do not use for current decisions if it conflicts with Current State.
 
 ${chat}`;
 }
