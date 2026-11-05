@@ -219,6 +219,96 @@ describe("LiveSessionController", () => {
     await controller.stop();
   });
 
+  test("tells the voice the chat is its own memory and that short follow-ups are about its latest turns", async () => {
+    let transportOptions: LiveTransportOptions | undefined;
+    const controller = new LiveSessionController({
+      sessionId: "session-memory",
+      chat: "User: Is Shizuku ready?\n\nAssistant: Shizuku is ready.",
+      native: fakeNative(),
+      getCredentials: vi.fn(async () => ({ accessToken: "token", accountId: "account" })),
+      delegate: vi.fn(),
+      createTransport: (options) => {
+        transportOptions = options;
+        return {
+          connect: vi.fn(async () => undefined),
+          send: vi.fn(async () => undefined),
+          setMuted: vi.fn(),
+          close: vi.fn(async () => undefined),
+        };
+      },
+      callbacks: {
+        onPhase: vi.fn(),
+        onLevels: vi.fn(),
+        onTranscript: vi.fn(),
+        onTerminal: vi.fn(),
+      },
+    });
+
+    await controller.start();
+    const instructions = transportOptions?.instructions ?? "";
+    expect(instructions).toContain("your own memory");
+    expect(instructions).toContain("is it fixed");
+    expect(instructions).toContain("Never ask what they mean");
+    // the one-assistant and delegation rules stay
+    expect(instructions).toContain("one assistant");
+    expect(instructions).toContain("delegation");
+    expect(instructions.indexOf("# Where things stand")).toBeGreaterThan(
+      instructions.indexOf("Never ask what they mean"),
+    );
+    expect(instructions.indexOf("# Where things stand")).toBeLessThan(
+      instructions.indexOf("# Conversation so far"),
+    );
+    await controller.stop();
+  });
+
+  test("reports what the server echoed of the instructions against what was sent", async () => {
+    let transportOptions: LiveTransportOptions | undefined;
+    const onInstructionsEcho = vi.fn();
+    const controller = new LiveSessionController({
+      sessionId: "session-echo",
+      chat: "User: hello",
+      native: fakeNative(),
+      getCredentials: vi.fn(async () => ({ accessToken: "token", accountId: "account" })),
+      delegate: vi.fn(),
+      createTransport: (options) => {
+        transportOptions = options;
+        return {
+          connect: vi.fn(async () => undefined),
+          send: vi.fn(async () => undefined),
+          setMuted: vi.fn(),
+          close: vi.fn(async () => undefined),
+        };
+      },
+      callbacks: {
+        onPhase: vi.fn(),
+        onLevels: vi.fn(),
+        onTranscript: vi.fn(),
+        onTerminal: vi.fn(),
+        onInstructionsEcho,
+      },
+    });
+
+    await controller.start();
+    const sent = transportOptions!.instructions;
+    // no echo, no report
+    transportOptions?.callbacks.onEvent({ type: "session.started", session: { id: "s" } });
+    expect(onInstructionsEcho).not.toHaveBeenCalled();
+
+    transportOptions?.callbacks.onEvent({
+      type: "session.started",
+      session: { id: "s", instructions: sent },
+    });
+    expect(onInstructionsEcho).toHaveBeenLastCalledWith({ sent: sent.length, echoed: sent.length });
+
+    transportOptions?.callbacks.onEvent({
+      type: "session.updated",
+      session: { id: "s", instructions: sent.slice(0, 100) },
+    });
+    expect(onInstructionsEcho).toHaveBeenLastCalledWith({ sent: sent.length, echoed: 100 });
+    expect(controller.instructionsEcho).toEqual({ sent: sent.length, echoed: 100 });
+    await controller.stop();
+  });
+
   test("owns no capture: the transport alone is created and connected on start", async () => {
     const createTransport = vi.fn((_options: LiveTransportOptions) => ({
       connect: vi.fn(async () => undefined),
