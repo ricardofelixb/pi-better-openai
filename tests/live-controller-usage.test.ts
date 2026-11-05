@@ -5,7 +5,11 @@ import {
   type LiveSessionControllerOptions,
 } from "../src/live/controller.ts";
 import type { LiveNativeBindings } from "../src/live/native.ts";
-import type { LiveClientMessage, LiveServerEvent } from "../src/live/protocol.ts";
+import {
+  chunkLiveContext,
+  type LiveClientMessage,
+  type LiveServerEvent,
+} from "../src/live/protocol.ts";
 import type { LiveTransportOptions } from "../src/live/transport.ts";
 
 type FakeSession = {
@@ -29,7 +33,7 @@ const DELEGATION: LiveServerEvent = {
 };
 
 const settle = async () => {
-  for (let index = 0; index < 10; index += 1) await Promise.resolve();
+  for (let index = 0; index < 50; index += 1) await Promise.resolve();
 };
 
 function harness(overrides: Partial<LiveSessionControllerOptions> = {}) {
@@ -41,7 +45,10 @@ function harness(overrides: Partial<LiveSessionControllerOptions> = {}) {
   const controller = new LiveSessionController({
     sessionId: "session-1",
     native: {} as LiveNativeBindings,
-    getCredentials: vi.fn(async () => ({ accessToken: "token", accountId: "account" })),
+    getCredentials: vi.fn(async () => ({
+      accessToken: "token",
+      accountId: "account",
+    })),
     delegate,
     createTransport: (options) => {
       const session: FakeSession = {
@@ -73,6 +80,10 @@ function harness(overrides: Partial<LiveSessionControllerOptions> = {}) {
   return { controller, sessions, phases, usage, terminal, delegate };
 }
 
+/** What a session was sent after its opening memory, which is its instructions as silent context. */
+const sentAfterMemory = (session: FakeSession) =>
+  session.sent.slice(chunkLiveContext(session.options.instructions).length);
+
 const seconds = async (count: number) => {
   await vi.advanceTimersByTimeAsync(count * 1000);
   await settle();
@@ -86,7 +97,10 @@ describe("billed seconds", () => {
     const { controller, sessions, usage } = harness({ idleHangupSeconds: 0 });
     await controller.start();
     await seconds(15);
-    sessions[0]!.emit({ type: "session.usage.updated", usage: { audio_duration_ms: 13_400 } });
+    sessions[0]!.emit({
+      type: "session.usage.updated",
+      usage: { audio_duration_ms: 13_400 },
+    });
     expect(usage).toEqual([13]);
 
     await seconds(7);
@@ -114,14 +128,19 @@ describe("billed seconds", () => {
     controller.handleAgentSettled();
     await settle();
     expect(sessions).toHaveLength(2);
-    sessions[1]!.emit({ type: "session.usage.updated", usage: { audio_duration_ms: 15_000 } });
+    sessions[1]!.emit({
+      type: "session.usage.updated",
+      usage: { audio_duration_ms: 15_000 },
+    });
     expect(usage.at(-1)).toBe(35);
   });
 });
 
 describe("idle hang-up", () => {
   test("ends the call like a hang-up once nobody has spoken or worked for the limit", async () => {
-    const { controller, sessions, terminal } = harness({ idleHangupSeconds: 120 });
+    const { controller, sessions, terminal } = harness({
+      idleHangupSeconds: 120,
+    });
     await controller.start();
     await seconds(119);
     expect(terminal).not.toHaveBeenCalled();
@@ -133,12 +152,20 @@ describe("idle hang-up", () => {
   });
 
   test("starts over whenever the user or the voice says something", async () => {
-    const { controller, sessions, terminal } = harness({ idleHangupSeconds: 120 });
+    const { controller, sessions, terminal } = harness({
+      idleHangupSeconds: 120,
+    });
     await controller.start();
     await seconds(100);
-    sessions[0]!.emit({ type: "input_transcript.added", item: { text: "Hello" } });
+    sessions[0]!.emit({
+      type: "input_transcript.added",
+      item: { text: "Hello" },
+    });
     await seconds(100);
-    sessions[0]!.emit({ type: "output_transcript.added", item: { text: "Hi there" } });
+    sessions[0]!.emit({
+      type: "output_transcript.added",
+      item: { text: "Hi there" },
+    });
     await seconds(119);
     expect(terminal).not.toHaveBeenCalled();
 
@@ -201,7 +228,7 @@ describe("parking", () => {
 
     expect(sessions).toHaveLength(2);
     expect(sessions[1]!.options.instructions).toContain("forty-three test files");
-    expect(sessions[1]!.sent).toEqual([
+    expect(sentAfterMemory(sessions[1]!)).toEqual([
       {
         type: "session.context.append",
         channel: "speakable",
@@ -223,11 +250,17 @@ describe("parking", () => {
   });
 
   test("waits for quiet: speech either way postpones it", async () => {
-    const { controller, sessions } = harness({ parkAfterSeconds: 20, idleHangupSeconds: 0 });
+    const { controller, sessions } = harness({
+      parkAfterSeconds: 20,
+      idleHangupSeconds: 0,
+    });
     await controller.start();
     sessions[0]!.emit(DELEGATION);
     await seconds(15);
-    sessions[0]!.emit({ type: "output_transcript.added", item: { text: "Looking into it" } });
+    sessions[0]!.emit({
+      type: "output_transcript.added",
+      item: { text: "Looking into it" },
+    });
     await seconds(19);
     expect(sessions[0]!.parked).toBe(false);
     await seconds(1);
@@ -241,7 +274,11 @@ describe("parking", () => {
     await seconds(600);
     expect(off.sessions[0]!.parked).toBe(false);
 
-    const fixed = harness({ parkAfterSeconds: 20, idleHangupSeconds: 0, canPark: () => false });
+    const fixed = harness({
+      parkAfterSeconds: 20,
+      idleHangupSeconds: 0,
+      canPark: () => false,
+    });
     await fixed.controller.start();
     fixed.sessions[0]!.emit(DELEGATION);
     await seconds(600);
@@ -270,12 +307,19 @@ describe("parking", () => {
     controller.handleAgentSettled();
     await settle();
     // the new session has no such delegation, so the result goes in as plain context
-    expect(sessions[1]!.sent.map((message) => message.type)).toEqual(["session.context.append"]);
-    expect(sessions[1]!.sent[0]).toMatchObject({ channel: "speakable" });
+    expect(sentAfterMemory(sessions[1]!).map((message) => message.type)).toEqual([
+      "session.context.append",
+    ]);
+    expect(sentAfterMemory(sessions[1]!)[0]).toMatchObject({
+      channel: "speakable",
+    });
   });
 
   test("a muted call stays muted through the park: the fresh session is told before it connects", async () => {
-    const { controller, sessions } = harness({ parkAfterSeconds: 20, idleHangupSeconds: 0 });
+    const { controller, sessions } = harness({
+      parkAfterSeconds: 20,
+      idleHangupSeconds: 0,
+    });
     await controller.start();
     controller.toggleMute();
     sessions[0]!.emit(DELEGATION);
@@ -293,7 +337,10 @@ describe("parking", () => {
   });
 
   test("an agent that settles while the session is closing is still spoken", async () => {
-    const { controller, sessions } = harness({ parkAfterSeconds: 20, idleHangupSeconds: 0 });
+    const { controller, sessions } = harness({
+      parkAfterSeconds: 20,
+      idleHangupSeconds: 0,
+    });
     await controller.start();
     sessions[0]!.emit(DELEGATION);
     // the timer fires and the park starts; the agent settles before it has finished
@@ -302,7 +349,7 @@ describe("parking", () => {
     controller.handleAgentSettled();
     await settle();
     expect(sessions).toHaveLength(2);
-    expect(sessions[1]!.sent).toHaveLength(1);
+    expect(sentAfterMemory(sessions[1]!)).toHaveLength(1);
   });
 
   test("ending a parked call is a normal stop that closes nothing twice", async () => {

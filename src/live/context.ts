@@ -1,6 +1,8 @@
 // What the voice knows of the pane's text chat. GPT-Live's Codex endpoint rejects `session.input`
 // (measured: "Unknown parameter: 'input'"), so the chat so far goes into the instructions, under a
-// heading of its own, and what is typed during the call goes in as silent context.
+// heading of its own. The endpoint does not act on the instructions either (measured: a rule in them
+// is not followed, the same text as session context is), so the controller sends them as silent
+// context too. What is typed during the call goes in as silent context.
 
 export const LIVE_DELEGATION_MESSAGE_TYPE = "better-openai-live-delegation";
 export const LIVE_TRANSCRIPT_MESSAGE_TYPE = "better-openai-live-transcript";

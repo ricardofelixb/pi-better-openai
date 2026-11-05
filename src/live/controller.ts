@@ -15,6 +15,8 @@ import { DEFAULT_LIVE_VOICE } from "./voices.ts";
 
 const LIVE_INSTRUCTIONS = `You are Better OpenAI Live, the voice of the same assistant the user has been chatting with in this session's text pane, which is also a coding assistant. You and that chat are one assistant with one memory. The chat history below these instructions is your own memory of what you and the user said and did, not background about someone else. Never say you don't have the earlier chat or ask the user to repeat it.
 
+These instructions and the chat reach you as silent context when the call starts. Do not react to them, read them out or speak until the user does.
+
 The user is speaking to you. Respond directly, briefly, conversationally, and in speech-friendly language. Never use markdown, code blocks, or long lists unless the user explicitly asks you to read technical detail aloud.
 
 Short or vague things the user says, such as "is it fixed", "how are we doing", "that thing", "are we done" or "what happened", are about the latest turns of the chat. Answer them from there, in your own words, as the one who was just in that conversation. Never ask what they mean or what you are talking about when the chat answers it. If the chat leaves it open, say what you last knew and what you take them to mean.
@@ -268,6 +270,9 @@ export class LiveSessionController {
     this.#sessionStartedAt ??= Date.now();
     this.#sessionLive = true;
     this.#touch();
+    // the endpoint does not act on the session's instructions (measured), but does on context
+    for (const chunk of chunkLiveContext(instructions))
+      this.#queueSend(buildSessionContextAppend(chunk, "commentary"));
     this.#sayPendingResult();
     this.#refreshAudioPhase();
     this.#armTimer();
@@ -485,7 +490,10 @@ export class LiveSessionController {
 
   #echoInstructions(echoed: string | undefined): void {
     if (echoed === undefined) return;
-    this.#instructionsEcho = { sent: this.#instructionsSent, echoed: echoed.length };
+    this.#instructionsEcho = {
+      sent: this.#instructionsSent,
+      echoed: echoed.length,
+    };
     this.#callbacks.onInstructionsEcho?.(this.#instructionsEcho);
   }
 

@@ -4,7 +4,7 @@ import {
   type LiveSessionControllerOptions,
 } from "../src/live/controller.ts";
 import type { LiveNativeBindings } from "../src/live/native.ts";
-import type { LiveClientMessage } from "../src/live/protocol.ts";
+import { chunkLiveContext, type LiveClientMessage } from "../src/live/protocol.ts";
 import type { LiveTransportOptions } from "../src/live/transport.ts";
 
 function fakeNative(): LiveNativeBindings {
@@ -30,7 +30,7 @@ function fakeNative(): LiveNativeBindings {
 }
 
 async function flushSends(): Promise<void> {
-  for (let index = 0; index < 6; index += 1) await Promise.resolve();
+  await new Promise((resolve) => setTimeout(resolve, 0));
 }
 
 describe("LiveSessionController", () => {
@@ -48,7 +48,10 @@ describe("LiveSessionController", () => {
       sessionId: "session-1",
       voice: "vale",
       native: fakeNative(),
-      getCredentials: vi.fn(async () => ({ accessToken: "token", accountId: "account" })),
+      getCredentials: vi.fn(async () => ({
+        accessToken: "token",
+        accountId: "account",
+      })),
       delegate,
       createTransport: (options) => {
         transportOptions = options;
@@ -143,7 +146,10 @@ describe("LiveSessionController", () => {
       sessionId: "session-1",
       chat: "User: My dog is called Biscuit.",
       native: fakeNative(),
-      getCredentials: vi.fn(async () => ({ accessToken: "token", accountId: "account" })),
+      getCredentials: vi.fn(async () => ({
+        accessToken: "token",
+        accountId: "account",
+      })),
       delegate: vi.fn(),
       createTransport: (options) => {
         transportOptions = options;
@@ -195,7 +201,7 @@ describe("LiveSessionController", () => {
 
     const silent = send.mock.calls
       .map(([message]) => message)
-      .filter((message) => message.type === "session.context.append");
+      .filter((message) => message.type === "session.context.append" && !message.channel);
     expect(silent).toEqual([
       {
         type: "session.context.append",
@@ -219,13 +225,64 @@ describe("LiveSessionController", () => {
     await controller.stop();
   });
 
+  test("sends the instructions and the chat as silent context too, because the endpoint ignores the instructions", async () => {
+    let transportOptions: LiveTransportOptions | undefined;
+    const send = vi.fn(async (_message: LiveClientMessage) => undefined);
+    const controller = new LiveSessionController({
+      sessionId: "session-memory-context",
+      chat: `User: Is Shizuku ready?\n\nAssistant: Shizuku is ready.\n\n${"Assistant: more. ".repeat(900)}`,
+      native: fakeNative(),
+      getCredentials: vi.fn(async () => ({
+        accessToken: "token",
+        accountId: "account",
+      })),
+      delegate: vi.fn(),
+      createTransport: (options) => {
+        transportOptions = options;
+        return {
+          connect: vi.fn(async () => undefined),
+          send,
+          setMuted: vi.fn(),
+          close: vi.fn(async () => undefined),
+        };
+      },
+      callbacks: {
+        onPhase: vi.fn(),
+        onLevels: vi.fn(),
+        onTranscript: vi.fn(),
+        onTerminal: vi.fn(),
+      },
+    });
+
+    await controller.start();
+    await flushSends();
+    const instructions = transportOptions?.instructions ?? "";
+    const chunks = chunkLiveContext(instructions);
+    expect(chunks.length).toBeGreaterThan(1);
+    expect(send.mock.calls.map(([message]) => message)).toEqual(
+      chunks.map((text) => ({
+        type: "session.context.append",
+        channel: "commentary",
+        content: [{ type: "input_text", text }],
+      })),
+    );
+    expect(chunks.join("")).toBe(instructions);
+    expect(instructions).toContain(
+      "Do not react to them, read them out or speak until the user does",
+    );
+    await controller.stop();
+  });
+
   test("tells the voice the chat is its own memory and that short follow-ups are about its latest turns", async () => {
     let transportOptions: LiveTransportOptions | undefined;
     const controller = new LiveSessionController({
       sessionId: "session-memory",
       chat: "User: Is Shizuku ready?\n\nAssistant: Shizuku is ready.",
       native: fakeNative(),
-      getCredentials: vi.fn(async () => ({ accessToken: "token", accountId: "account" })),
+      getCredentials: vi.fn(async () => ({
+        accessToken: "token",
+        accountId: "account",
+      })),
       delegate: vi.fn(),
       createTransport: (options) => {
         transportOptions = options;
@@ -268,7 +325,10 @@ describe("LiveSessionController", () => {
       sessionId: "session-echo",
       chat: "User: hello",
       native: fakeNative(),
-      getCredentials: vi.fn(async () => ({ accessToken: "token", accountId: "account" })),
+      getCredentials: vi.fn(async () => ({
+        accessToken: "token",
+        accountId: "account",
+      })),
       delegate: vi.fn(),
       createTransport: (options) => {
         transportOptions = options;
@@ -291,21 +351,33 @@ describe("LiveSessionController", () => {
     await controller.start();
     const sent = transportOptions!.instructions;
     // no echo, no report
-    transportOptions?.callbacks.onEvent({ type: "session.started", session: { id: "s" } });
+    transportOptions?.callbacks.onEvent({
+      type: "session.started",
+      session: { id: "s" },
+    });
     expect(onInstructionsEcho).not.toHaveBeenCalled();
 
     transportOptions?.callbacks.onEvent({
       type: "session.started",
       session: { id: "s", instructions: sent },
     });
-    expect(onInstructionsEcho).toHaveBeenLastCalledWith({ sent: sent.length, echoed: sent.length });
+    expect(onInstructionsEcho).toHaveBeenLastCalledWith({
+      sent: sent.length,
+      echoed: sent.length,
+    });
 
     transportOptions?.callbacks.onEvent({
       type: "session.updated",
       session: { id: "s", instructions: sent.slice(0, 100) },
     });
-    expect(onInstructionsEcho).toHaveBeenLastCalledWith({ sent: sent.length, echoed: 100 });
-    expect(controller.instructionsEcho).toEqual({ sent: sent.length, echoed: 100 });
+    expect(onInstructionsEcho).toHaveBeenLastCalledWith({
+      sent: sent.length,
+      echoed: 100,
+    });
+    expect(controller.instructionsEcho).toEqual({
+      sent: sent.length,
+      echoed: 100,
+    });
     await controller.stop();
   });
 
@@ -321,7 +393,10 @@ describe("LiveSessionController", () => {
     const controller = new LiveSessionController({
       sessionId: "session-no-capture",
       native,
-      getCredentials: vi.fn(async () => ({ accessToken: "token", accountId: "account" })),
+      getCredentials: vi.fn(async () => ({
+        accessToken: "token",
+        accountId: "account",
+      })),
       delegate: vi.fn(),
       createTransport,
       callbacks: {
@@ -350,7 +425,10 @@ describe("LiveSessionController", () => {
     const controller = new LiveSessionController({
       sessionId: "session-levels",
       native: fakeNative(),
-      getCredentials: vi.fn(async () => ({ accessToken: "token", accountId: "account" })),
+      getCredentials: vi.fn(async () => ({
+        accessToken: "token",
+        accountId: "account",
+      })),
       delegate: vi.fn(),
       createTransport: (options) => {
         transportOptions = options;
@@ -392,7 +470,10 @@ describe("LiveSessionController", () => {
     const controller = new LiveSessionController({
       sessionId: "session-mute",
       native: fakeNative(),
-      getCredentials: vi.fn(async () => ({ accessToken: "token", accountId: "account" })),
+      getCredentials: vi.fn(async () => ({
+        accessToken: "token",
+        accountId: "account",
+      })),
       delegate: vi.fn(),
       createTransport: (options) => {
         transportOptions = options;
@@ -427,7 +508,10 @@ describe("LiveSessionController", () => {
     const controller = new LiveSessionController({
       sessionId: "session-stop-order",
       native: fakeNative(),
-      getCredentials: vi.fn(async () => ({ accessToken: "token", accountId: "account" })),
+      getCredentials: vi.fn(async () => ({
+        accessToken: "token",
+        accountId: "account",
+      })),
       delegate: vi.fn(),
       createTransport: () => ({
         connect: vi.fn(async () => undefined),
@@ -459,7 +543,10 @@ describe("LiveSessionController", () => {
     const controller = new LiveSessionController({
       sessionId: "session-failure",
       native: fakeNative(),
-      getCredentials: vi.fn(async () => ({ accessToken: "token", accountId: "account" })),
+      getCredentials: vi.fn(async () => ({
+        accessToken: "token",
+        accountId: "account",
+      })),
       delegate: vi.fn(),
       createTransport: (options) => {
         transportOptions = options;
@@ -527,7 +614,9 @@ describe("LiveSessionController", () => {
     });
 
     test("keeps the transport's own local media when nothing else is chosen", async () => {
-      const { controller, created } = startable({ resolveMedia: async () => undefined });
+      const { controller, created } = startable({
+        resolveMedia: async () => undefined,
+      });
       await controller.start();
       expect(created[0]).toBeDefined();
       expect(created[0]?.createMedia).toBeUndefined();
