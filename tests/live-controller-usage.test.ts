@@ -589,6 +589,18 @@ describe("parking", () => {
     );
     expect(sentAfterMemory(sessions[1]!)).toHaveLength(1);
     expect(sentAfterMemory(sessions[1]!)[0]).toMatchObject({ channel: "speakable" });
+
+    // Speech after the requested result still counts for memory on the next resume.
+    sessions[1]!.options.callbacks.onLevels(0.1, 0);
+    sessions[1]!.emit({ type: "input_transcript.added", item: { text: "Thanks. Count again." } });
+    sessions[1]!.emit(DELEGATION);
+    await seconds(20);
+    controller.resume();
+    await settle();
+    expect(sessions).toHaveLength(3);
+    expect(sessions[2]!.sent.length).toBe(
+      chunkLiveContext(sessions[2]!.options.instructions).length,
+    );
   });
 
   test("ending a parked call is a normal stop that closes nothing twice", async () => {
