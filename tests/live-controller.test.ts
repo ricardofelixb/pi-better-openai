@@ -229,7 +229,7 @@ describe("LiveSessionController", () => {
     await controller.stop();
   });
 
-  test("holds the silent instructions and chat until user speech when levels are unavailable", async () => {
+  test("sends silent instructions and chat at connect before the user's first words", async () => {
     let transportOptions: LiveTransportOptions | undefined;
     const send = vi.fn(async (_message: LiveClientMessage) => undefined);
     const controller = new LiveSessionController({
@@ -263,12 +263,6 @@ describe("LiveSessionController", () => {
     const instructions = transportOptions?.instructions ?? "";
     const chunks = chunkLiveContext(instructions);
     expect(chunks.length).toBeGreaterThan(1);
-    expect(send.mock.calls.length).toBe(0);
-    transportOptions?.callbacks.onEvent({
-      type: "input_transcript.added",
-      item: { text: "Is it ready?" },
-    });
-    await flushSends();
     expect(send.mock.calls.map(([message]) => message)).toEqual(
       chunks.map((text) => ({
         type: "session.context.append",

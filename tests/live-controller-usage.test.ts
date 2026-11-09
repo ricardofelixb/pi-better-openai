@@ -185,7 +185,7 @@ test.each(["input_transcript.added", "turn.done"] as const)(
     await seconds(3);
     first.emit(transcript("Okay"));
     expect(first.calls).not.toContain("playback:false");
-    expect(first.sent.length).toBe(0);
+    expect(first.sent.length).toBe(chunkLiveContext(first.options.instructions).length);
 
     first.options.callbacks.onLevels(0.1, 0);
     first.options.callbacks.onLevels(0, 0);
@@ -211,7 +211,7 @@ test.each(["input_transcript.added", "turn.done"] as const)(
   },
 );
 
-test("holds queued chat behind opening memory and sends memory immediately on a spoken-call resume", async () => {
+test("sends opening memory at connect before queued chat and again on resume", async () => {
   const { controller, sessions } = harness({
     chat: "User: Is the image ready?",
     parkAfterSeconds: 20,
@@ -219,18 +219,15 @@ test("holds queued chat behind opening memory and sends memory immediately on a 
   await controller.start();
   await settle();
   const first = sessions[0]!;
-  expect(first.sent.length).toBe(0);
-  controller.handleAgentMessage({ role: "user", content: "Check the image." });
-  await settle();
-  expect(first.sent.length).toBe(0);
-
-  first.emit({ type: "input_transcript.added", item: { text: "Hello" } });
-  await settle();
   const memory = chunkLiveContext(first.options.instructions).map((text) => ({
     type: "session.context.append",
     channel: "commentary",
     content: [{ type: "input_text", text }],
   }));
+  expect(first.sent).toEqual(memory);
+  expect(first.calls).not.toContain("playback:false");
+  controller.handleAgentMessage({ role: "user", content: "Check the image." });
+  await settle();
   expect(first.sent.slice(0, memory.length)).toEqual(memory);
   expect(sentAfterMemory(first)).toEqual([
     {
@@ -571,7 +568,9 @@ describe("parking", () => {
     });
     await controller.start();
     await settle();
-    expect(sessions[0]!.sent.length).toBe(0);
+    expect(sessions[0]!.sent.length).toBe(
+      chunkLiveContext(sessions[0]!.options.instructions).length,
+    );
     sessions[0]!.emit(DELEGATION);
     // the timer fires and the park starts; the agent settles before it has finished
     await vi.advanceTimersByTimeAsync(20_000);
@@ -590,7 +589,7 @@ describe("parking", () => {
     expect(sentAfterMemory(sessions[1]!)).toHaveLength(1);
     expect(sentAfterMemory(sessions[1]!)[0]).toMatchObject({ channel: "speakable" });
 
-    // Speech after the requested result still counts for memory on the next resume.
+    // A later resume also sends memory before any new speech.
     sessions[1]!.options.callbacks.onLevels(0.1, 0);
     sessions[1]!.emit({ type: "input_transcript.added", item: { text: "Thanks. Count again." } });
     sessions[1]!.emit(DELEGATION);
