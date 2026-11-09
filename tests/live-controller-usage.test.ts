@@ -261,12 +261,21 @@ describe("parking", () => {
 
   test("closes the session, keeps the call, and speaks the result in a fresh session", async () => {
     let chat = "User: hello";
+    const onTranscript = vi.fn();
+    const onLevels = vi.fn();
     const { controller, sessions, phases, terminal, delegate } = harness({
       chat: () => chat,
       parkAfterSeconds: 20,
       idleHangupSeconds: 120,
+      callbacks: {
+        onPhase: (phase) => phases.push(phase),
+        onLevels,
+        onTranscript,
+        onTerminal: (error) => terminal(error),
+      },
     });
     await controller.start();
+    sessions[0]!.emit({ type: "input_transcript.added", item: { text: "Count the tests." } });
     sessions[0]!.emit(DELEGATION);
     expect(delegate).toHaveBeenCalledWith("Count the tests.");
 
@@ -304,6 +313,31 @@ describe("parking", () => {
       },
     ]);
     expect(phases.at(-1)).toBe("listening");
+    expect(sessions[1]!.calls).toEqual([
+      "mute:false",
+      "playback:true",
+      "connect",
+      "playback:false",
+    ]);
+    sessions[1]!.emit({ type: "output_transcript.added", item: { text: "There are" } });
+    expect(onTranscript).toHaveBeenLastCalledWith({
+      role: "assistant",
+      text: "There are",
+      turn: 1,
+      final: false,
+    });
+    sessions[1]!.emit({
+      type: "turn.done",
+      turn: { role: "assistant", transcript: "There are forty-three test files." },
+    });
+    expect(onTranscript).toHaveBeenLastCalledWith({
+      role: "assistant",
+      text: "There are forty-three test files.",
+      turn: 1,
+      final: true,
+    });
+    sessions[1]!.options.callbacks.onLevels(0, 0.5);
+    expect(onLevels).toHaveBeenLastCalledWith(0, 0.5);
 
     // the idle limit starts over once the result is out
     await seconds(119);
@@ -351,12 +385,20 @@ describe("parking", () => {
   });
 
   test("resumes early on request, and the result still reaches the fresh session when it comes", async () => {
+    const onTranscript = vi.fn();
     const { controller, sessions, phases } = harness({
       chat: () => "User (by voice): Count the tests.",
       parkAfterSeconds: 20,
       idleHangupSeconds: 0,
+      callbacks: {
+        onPhase: (phase) => phases.push(phase),
+        onLevels: vi.fn(),
+        onTranscript,
+        onTerminal: vi.fn(),
+      },
     });
     await controller.start();
+    sessions[0]!.emit({ type: "input_transcript.added", item: { text: "Count the tests." } });
     sessions[0]!.emit(DELEGATION);
     await seconds(20);
     expect(phases.at(-1)).toBe("parked");
@@ -366,6 +408,14 @@ describe("parking", () => {
     expect(sessions).toHaveLength(2);
     expect(sessions[1]!.options.instructions).toContain("Count the tests.");
     expect(phases).toContain("connecting");
+    expect(sessions[1]!.calls).toEqual(["mute:false", "playback:true", "connect"]);
+    const count = onTranscript.mock.calls.length;
+    sessions[1]!.emit({ type: "output_transcript.added", item: { text: "Good morning" } });
+    sessions[1]!.emit({
+      type: "turn.done",
+      turn: { role: "assistant", transcript: "I'm ChatGPT" },
+    });
+    expect(onTranscript).toHaveBeenCalledTimes(count);
 
     controller.handleAgentMessage(FINAL);
     controller.handleAgentSettled();
@@ -376,6 +426,24 @@ describe("parking", () => {
     ]);
     expect(sentAfterMemory(sessions[1]!)[0]).toMatchObject({
       channel: "speakable",
+    });
+    expect(sessions[1]!.calls.at(-1)).toBe("playback:false");
+    sessions[1]!.emit({ type: "output_transcript.added", item: { text: "There are" } });
+    expect(onTranscript).toHaveBeenLastCalledWith({
+      role: "assistant",
+      text: "There are",
+      turn: 1,
+      final: false,
+    });
+    sessions[1]!.emit({
+      type: "turn.done",
+      turn: { role: "assistant", transcript: "There are forty-three test files." },
+    });
+    expect(onTranscript).toHaveBeenLastCalledWith({
+      role: "assistant",
+      text: "There are forty-three test files.",
+      turn: 1,
+      final: true,
     });
   });
 
