@@ -30,6 +30,15 @@ function textOf(content: unknown): string {
     .trim();
 }
 
+/** The voice's own saved lines are not memory: replaying them makes startup filler snowball. */
+function userCallContext(text: string): string | undefined {
+  const turns = text
+    .split(/\n(?=(?:User|Assistant): )/)
+    .filter((turn) => turn.startsWith("User: "))
+    .map((turn) => turn.trim());
+  return turns.length ? `${LIVE_TRANSCRIPT_HEADING}\n${turns.join("\n")}` : undefined;
+}
+
 /** A message as one line of the voice's view of the chat, or undefined when it holds no prose. */
 export function chatLine(message: unknown): string | undefined {
   if (!isRecord(message)) return undefined;
@@ -40,7 +49,7 @@ export function chatLine(message: unknown): string | undefined {
   if (message.role === "assistant") return `Assistant: ${text}`;
   if (message.role !== "custom") return undefined;
   if (message.customType === LIVE_DELEGATION_MESSAGE_TYPE) return `User (by voice): ${text}`;
-  if (message.customType === LIVE_TRANSCRIPT_MESSAGE_TYPE) return text;
+  if (message.customType === LIVE_TRANSCRIPT_MESSAGE_TYPE) return userCallContext(text);
   return undefined;
 }
 
