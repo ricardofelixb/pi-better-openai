@@ -66,6 +66,7 @@ function fakeMedia() {
     waitForOpen: vi.fn(async () => void calls.push(["waitForOpen"])),
     activate: vi.fn(() => void calls.push(["activate"])),
     setMuted: vi.fn((muted: boolean) => void calls.push(["setMuted", muted])),
+    setPlaybackMuted: vi.fn(),
     close: vi.fn(async () => void calls.push(["close"])),
   };
   const createMedia = vi.fn((next: LiveMediaCallbacks, nextSignal?: AbortSignal) => {
@@ -156,6 +157,21 @@ describe("CodexLiveTransport media seam", () => {
     expect(media.calls).toContainEqual(["setMuted", true]);
     transport.setMuted(false);
     expect(media.media.setMuted).toHaveBeenLastCalledWith(false);
+    await transport.close();
+  });
+
+  test("applies playback mute before negotiation and forwards later changes", async () => {
+    const media = fakeMedia();
+    const { transport } = makeTransport(media);
+    transport.setPlaybackMuted(true);
+    const connecting = transport.connect();
+    expect(media.media.setPlaybackMuted).toHaveBeenCalledExactlyOnceWith(true);
+    expect(vi.mocked(media.media.setPlaybackMuted).mock.invocationCallOrder[0]).toBeLessThan(
+      vi.mocked(media.media.createOffer).mock.invocationCallOrder[0]!,
+    );
+    await connecting;
+    transport.setPlaybackMuted(false);
+    expect(media.media.setPlaybackMuted).toHaveBeenLastCalledWith(false);
     await transport.close();
   });
 

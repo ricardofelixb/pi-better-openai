@@ -451,6 +451,42 @@ describe("RemoteLiveMedia (client)", () => {
     }
   });
 
+  test.each([
+    { features: undefined },
+    { features: ["park", "future-feature"] },
+    { features: ["playback", "future-feature"] },
+  ])("only sends playback control to hosts advertising it: $features", async ({ features }) => {
+    const { proc, media, callbacks } = clientSetup();
+    media.setPlaybackMuted(true);
+    const offer = media.createOffer();
+    expect(proc.written).toEqual([]);
+    proc.host({ type: "hello", ...(features ? { features } : {}) });
+    await vi.waitFor(() => expect(proc.written[0]).toMatchObject({ method: "open" }));
+    proc.host({ type: "response", id: 1, ok: true });
+    await vi.waitFor(() => expect(proc.written.at(-1)).toMatchObject({ method: "createOffer" }));
+    const request = proc.written.at(-1) as { id: number };
+    proc.host({ type: "response", id: request.id, ok: true, sdp: "offer" });
+    await expect(offer).resolves.toBe("offer");
+    media.setPlaybackMuted(false);
+    media.activate();
+    await vi.waitFor(() => expect(proc.written.at(-1)).toEqual({ type: "activate" }));
+    expect(proc.written.filter((frame) => frame.type === "playback")).toEqual(
+      features?.includes("playback")
+        ? [
+            { type: "playback", muted: true },
+            { type: "playback", muted: false },
+          ]
+        : [],
+    );
+    if (features?.includes("playback")) {
+      expect(proc.written[1]).toEqual({ type: "playback", muted: true });
+    }
+    expect(callbacks.onFailure).not.toHaveBeenCalled();
+    const closing = media.close();
+    proc.exit(0);
+    await closing;
+  });
+
   test("keeps notifications sent before the open completes, in order", async () => {
     const { proc, media } = clientSetup();
     media.setMuted(true);

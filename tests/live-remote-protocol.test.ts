@@ -22,6 +22,8 @@ const CLIENT_FRAMES: ClientFrame[] = [
   { type: "request", id: 5, method: "waitForOpen", timeoutMs: 15_000 },
   { type: "activate" },
   { type: "mute", muted: true },
+  { type: "playback", muted: true },
+  { type: "playback", muted: false },
   { type: "close" },
 ];
 
@@ -168,6 +170,9 @@ describe("live media protocol validation", () => {
       { type: "request", id: 1, method: "waitForOpen", timeoutMs: 1.5 },
       { type: "mute" },
       { type: "mute", muted: "yes" },
+      { type: "playback" },
+      { type: "playback", muted: "yes" },
+      { type: "playback", muted: false, extra: 1 },
     ];
     for (const frame of badClient) {
       expect(() => parseClientFrame(line({ v: 1, ...(frame as object) })), line(frame)).toThrow(
@@ -224,7 +229,10 @@ describe("host identity and lease frames", () => {
   });
 
   test("hello may name the features the media host has, up to eight of up to 32 characters", () => {
-    const hello = { type: "hello" as const, features: ["park", "usage"] };
+    const hello = {
+      type: "hello" as const,
+      features: ["park", "usage", "playback", "future-feature"],
+    };
     expect(new FrameDecoder(parseHostFrame).push(encodeFrame(hello))).toEqual([hello]);
     const eight = Array.from({ length: 8 }, (_, index) => `feature-${index}`);
     expect(parseHostFrame(line({ v: 1, type: "hello", features: eight }))).toMatchObject({

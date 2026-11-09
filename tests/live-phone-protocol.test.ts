@@ -40,6 +40,7 @@ const PI_FRAMES: Array<Record<string, unknown>> = [
   { type: "request", id: 4, method: "waitForOpen", timeoutMs: 10_000 },
   { type: "activate" },
   { type: "mute", muted: false },
+  { type: "playback", muted: true },
   { type: "ping" },
   { type: "close" },
   { type: "park" },
