@@ -229,7 +229,7 @@ describe("LiveSessionController", () => {
     await controller.stop();
   });
 
-  test("holds the silent instructions and chat until user speech when levels are unavailable", async () => {
+  test("sends silent instructions and chat at connect before the user's first words", async () => {
     let transportOptions: LiveTransportOptions | undefined;
     const send = vi.fn(async (_message: LiveClientMessage) => undefined);
     const controller = new LiveSessionController({
@@ -263,12 +263,6 @@ describe("LiveSessionController", () => {
     const instructions = transportOptions?.instructions ?? "";
     const chunks = chunkLiveContext(instructions);
     expect(chunks.length).toBeGreaterThan(1);
-    expect(send.mock.calls.length).toBe(0);
-    transportOptions?.callbacks.onEvent({
-      type: "input_transcript.added",
-      item: { text: "Is it ready?" },
-    });
-    await flushSends();
     expect(send.mock.calls.map(([message]) => message)).toEqual(
       chunks.map((text) => ({
         type: "session.context.append",
@@ -316,10 +310,15 @@ describe("LiveSessionController", () => {
     expect(instructions).toContain("your own memory");
     expect(instructions).toContain("is it fixed");
     expect(instructions).toContain("Never ask what they mean");
+    expect(instructions).toContain("For greetings or small talk, reply briefly in kind");
+    expect(instructions).toContain(
+      "do not recap the chat or bring up a topic the user did not raise",
+    );
+    expect(instructions).toContain("If asked what's new, use the newest turns in Current State");
     // the one-assistant and delegation rules stay
     expect(instructions).toContain("one assistant");
     expect(instructions).toContain("delegation");
-    // the guide's labeled sections, then its context pattern: current state, then background
+    // the guide's labeled sections, with current state last for recency
     const at = (heading: string) => instructions.indexOf(heading);
     for (const heading of [
       "# Role and Objective",
@@ -333,8 +332,8 @@ describe("LiveSessionController", () => {
     expect(at("## Context")).toBeLessThan(at("### Current State"));
     expect(instructions).toContain("Current State wins");
     expect(at("### Current State")).toBeGreaterThan(at("Never ask what they mean"));
-    expect(instructions.indexOf("### Current State")).toBeLessThan(
-      instructions.indexOf("### Historical or Background Sources"),
+    expect(instructions.indexOf("### Historical or Background Sources")).toBeLessThan(
+      instructions.indexOf("### Current State"),
     );
     await controller.stop();
   });

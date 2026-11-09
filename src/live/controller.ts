@@ -21,6 +21,8 @@ You are Better OpenAI Live, the voice of the same assistant the user has been ch
 # Personality and Tone
 The user is speaking to you. Respond directly, briefly, conversationally, and in speech-friendly language. Never use markdown, code blocks, or long lists unless the user explicitly asks you to read technical detail aloud.
 
+For greetings or small talk, reply briefly in kind; do not recap the chat or bring up a topic the user did not raise. If asked what's new, use the newest turns in Current State.
+
 # Tools
 The client has the active repository context, coding model, and tools. Create a client delegation promptly when the answer needs fresh work or status the chat does not hold: coding, repository investigation, tool use, commands, verification, or finding out whether something has changed since the chat's latest turns. Include the complete request and relevant conversational context. Keep conversation natural while work runs.
 
@@ -160,9 +162,8 @@ export class LiveSessionController {
   #failure: Error | undefined;
   #muted = false;
   #awaitingUserSpeech = true;
-  #userHasSpoken = false;
-  #openingContext: string | undefined;
-  #heldMessages: LiveClientMessage[] = [];
+  #playbackRequested = false;
+  #openingResponseActive = false;
   #phase: LivePhase = "connecting";
   #inputLevel = 0;
   #levelsReceived = false;
@@ -262,9 +263,9 @@ export class LiveSessionController {
       typeof chat === "function" ? chat() : (chat ?? ""),
     );
     this.#instructionsSent = instructions.length;
-    this.#openingContext = instructions;
-    this.#heldMessages = [];
     this.#awaitingUserSpeech = true;
+    this.#playbackRequested = false;
+    this.#openingResponseActive = false;
     this.#levelsReceived = false;
     this.#lastInputSpeechAt = Number.NEGATIVE_INFINITY;
     const session = ++this.#sessionNumber;
@@ -292,8 +293,9 @@ export class LiveSessionController {
     this.#sessionStartedAt ??= Date.now();
     this.#sessionLive = true;
     this.#touch();
-    // Only a call's first speech waits for memory; later sessions need the updated chat at once.
-    if (this.#userHasSpoken) this.#flushOpeningContext();
+    // The endpoint ignores session instructions, so send them before any progress/results.
+    for (const chunk of chunkLiveContext(instructions))
+      this.#queueSend(buildSessionContextAppend(chunk, "commentary"));
     this.#sayPendingResult();
     this.#refreshAudioPhase();
     this.#armTimer();
@@ -411,9 +413,7 @@ export class LiveSessionController {
   /** The result of work the session did not hear started, as context the voice says unprompted. */
   #sayResult(context: string): void {
     // A requested result must be heard even when no one spoke after reconnecting.
-    this.#awaitingUserSpeech = false;
-    this.#transport?.setPlaybackMuted?.(false);
-    this.#flushOpeningContext();
+    this.#requestPlayback();
     for (const chunk of chunkLiveContext(context)) {
       this.#queueSend(buildSessionContextAppend(chunk, "speakable"));
     }
@@ -489,13 +489,18 @@ export class LiveSessionController {
         this.#addTranscript("user", event.item.text);
         break;
       case "output_transcript.added":
-        if (this.#awaitingUserSpeech) break;
+        if (!this.#acceptAssistantOutput()) break;
         this.#touch();
         this.#addTranscript("assistant", event.item.text);
         break;
       case "turn.done":
         if (event.turn.role === "user") this.#hearUser(event.turn.transcript);
-        else if (this.#awaitingUserSpeech) break;
+        else if (this.#awaitingUserSpeech) {
+          // No cancel command is available: discard the entire opening response.
+          // Playback stays muted until output from the following response arrives.
+          this.#openingResponseActive = false;
+          break;
+        }
         this.#touch();
         this.#finishTranscript(event.turn.role, event.turn.transcript);
         break;
@@ -510,7 +515,7 @@ export class LiveSessionController {
         this.#touch();
         break;
       case "output_audio.delta":
-        if (this.#awaitingUserSpeech) break;
+        if (!this.#acceptAssistantOutput()) break;
         this.#touch();
         break;
       case "unknown":
@@ -523,11 +528,21 @@ export class LiveSessionController {
     // Missing telemetry keeps the transcript-only fallback; measured silence does not.
     if (this.#levelsReceived && Date.now() - this.#lastInputSpeechAt > INPUT_SPEECH_WINDOW_MS)
       return;
-    this.#userHasSpoken = true;
-    if (!this.#awaitingUserSpeech) return;
+    this.#requestPlayback();
+  }
+
+  #requestPlayback(): void {
+    this.#playbackRequested = true;
+    if (!this.#awaitingUserSpeech || this.#openingResponseActive) return;
     this.#awaitingUserSpeech = false;
     this.#transport?.setPlaybackMuted?.(false);
-    this.#flushOpeningContext();
+  }
+
+  #acceptAssistantOutput(): boolean {
+    if (this.#playbackRequested) this.#requestPlayback();
+    if (!this.#awaitingUserSpeech) return true;
+    this.#openingResponseActive = true;
+    return false;
   }
 
   #echoInstructions(echoed: string | undefined): void {
@@ -561,7 +576,11 @@ export class LiveSessionController {
   #handleLevels(input: number, output: number): void {
     this.#levelsReceived = true;
     if (!this.#muted && input > INPUT_ACTIVE_LEVEL) this.#lastInputSpeechAt = Date.now();
-    if (this.#awaitingUserSpeech) output = 0;
+    if (this.#awaitingUserSpeech) {
+      if (!this.#playbackRequested && output > OUTPUT_ACTIVE_LEVEL)
+        this.#openingResponseActive = true;
+      output = 0;
+    }
     const outputChanged = output !== this.#outputLevel;
     this.#inputLevel = input;
     this.#outputLevel = output;
@@ -633,25 +652,9 @@ export class LiveSessionController {
     this.#emitTranscript({ role, turn, text: normalized, final });
   }
 
-  #flushOpeningContext(): void {
-    if (!this.#sessionLive || this.#openingContext === undefined) return;
-    const context = this.#openingContext;
-    const queued = this.#heldMessages;
-    this.#openingContext = undefined;
-    this.#heldMessages = [];
-    // The endpoint ignores session instructions, so memory must precede queued progress/results.
-    for (const chunk of chunkLiveContext(context))
-      this.#queueSend(buildSessionContextAppend(chunk, "commentary"));
-    for (const message of queued) this.#queueSend(message);
-  }
-
   #queueSend(message: LiveClientMessage): void {
     const transport = this.#transport;
     if (!transport || !this.#sessionLive || this.#stopped) return;
-    if (this.#openingContext !== undefined) {
-      this.#heldMessages.push(message);
-      return;
-    }
     this.#sendChain = this.#sendChain
       .then(async () => {
         if (!this.#stopped) await transport.send(message);
