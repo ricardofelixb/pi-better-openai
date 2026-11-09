@@ -234,7 +234,13 @@ describe("the live bridge socket", () => {
     expect(host.seen[0]).toBe(ready);
   });
 
-  test("does not listen outside a Herdr pane, outside the TUI, or with live voice off", async () => {
+  test("listens in an hc terminal and names it as the pane", async () => {
+    await setup({ env: { HC_TERMINAL_ID: "t2s" } });
+    const { ready } = await open();
+    expect(ready).toEqual({ v: 1, type: "ready", pid: process.pid, pane: "t2s", busy: false });
+  });
+
+  test("does not listen outside a Herdr pane or hc terminal, outside the TUI, or with live voice off", async () => {
     await setup({ env: {} });
     expect(existsSync(socketPath())).toBe(false);
     await setup({ mode: "rpc" });

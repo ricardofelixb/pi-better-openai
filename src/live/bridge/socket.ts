@@ -131,7 +131,7 @@ export class LiveBridgeConnection {
 
 export interface BridgeConnectionOptions {
   pid?: number;
-  /** The Herdr pane this Pi runs in, so the relay can check it reached the pane it meant to. */
+  /** The Herdr pane or hc terminal this Pi runs in, so the relay can check it reached the pane it meant to. */
   pane?: string | undefined;
   isBusy(): boolean;
   onConnection(connection: LiveBridgeConnection): void;

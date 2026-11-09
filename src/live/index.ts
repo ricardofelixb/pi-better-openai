@@ -130,7 +130,7 @@ export interface LiveRegistrationDependencies {
   resolveTarget?: RouteDependencies["resolveTarget"];
   /** Where the bridge socket goes; defaults to Pi's agent directory. */
   bridgeAgentDir?: string;
-  /** The environment that says whether Pi runs in a Herdr pane; defaults to this process's. */
+  /** The environment that says whether Pi runs in a Herdr pane or hc terminal; defaults to this process's. */
   env?: NodeJS.ProcessEnv;
 }
 
@@ -641,13 +641,14 @@ export function registerOpenAILive(
     bridgeCtx = ctx;
     publishPhoneEndpoint();
     if (bridge || attaching) return;
-    if (process.platform === "win32" || !env.HERDR_PANE_ID || ctx.mode !== "tui") return;
+    const pane = env.HERDR_PANE_ID || env.HC_TERMINAL_ID;
+    if (process.platform === "win32" || !pane || ctx.mode !== "tui") return;
     attaching = true;
     try {
       if (!getConfig(ctx).live.enabled) return;
       const server = new LiveBridgeServer({
         agentDir: dependencies.bridgeAgentDir ?? piAgentDir(),
-        pane: env.HERDR_PANE_ID,
+        pane,
         isBusy,
         onConnection: handleBridgeConnection,
       });
