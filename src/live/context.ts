@@ -9,11 +9,11 @@ export const LIVE_TRANSCRIPT_MESSAGE_TYPE = "better-openai-live-transcript";
 /** The first line of a saved call, so it reads as one wherever it lands. */
 export const LIVE_TRANSCRIPT_HEADING = "Live voice call:";
 
-/** About 6,000 tokens of chat, well inside the 16,384 the instructions may take. */
-export const LIVE_HISTORY_BUDGET = 24_000;
-/** The newest turns the voice reads first: at most this many turns, in about this many characters. */
-export const LIVE_STAND_TURNS = 4;
-export const LIVE_STAND_BUDGET = 1_500;
+/** About 2,000 tokens of background, leaving room for the latest turns and instructions. */
+export const LIVE_HISTORY_BUDGET = 8_000;
+/** The newest turns the voice reads last: at most this many turns, in about this many characters. */
+export const LIVE_STAND_TURNS = 8;
+export const LIVE_STAND_BUDGET = 4_000;
 /** One message typed during the call, before it is cut. */
 export const LIVE_TYPED_BUDGET = 2_000;
 
@@ -100,9 +100,8 @@ const TURN_START =
   /\n\n(?=(?:User(?: \(by voice\))?|Assistant): |Summary of the earlier conversation: |Live voice call:)/;
 
 /**
- * The session's instructions with the chat so far after them, when any, in the structure OpenAI's
- * voice prompting guide gives long context: the current state first, the older history marked as
- * background that loses to it.
+ * The session's instructions with the chat so far after them, using OpenAI's labeled long-context
+ * sections. Background loses to Current State; put the newest turns last for recency.
  * https://developers.openai.com/api/docs/guides/voice-prompting
  */
 export function withChat(instructions: string, chat: string): string {
@@ -112,17 +111,17 @@ export function withChat(instructions: string, chat: string): string {
 
 ## Context
 
-### Current State
-- **Latest known state:** the newest turns of this session's chat, oldest first. What the user says next is about them unless they say otherwise.
-
-${stand}
-
 ### Historical or Background Sources
 - **Source:** this session's text chat before the call, oldest first, ending with the turns in Current State. Your own memory, not a new request.
 - **Status:** background
 - **Note:** Do not use for current decisions if it conflicts with Current State.
 
-${chat}`;
+${chat}
+
+### Current State
+- **Latest known state:** the newest turns of this session's chat, oldest first. What the user says next is about them unless they say otherwise.
+
+${stand}`;
 }
 
 /** A message typed in the chat during the call, as silent context; undefined when it holds no prose. */
