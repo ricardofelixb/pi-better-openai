@@ -158,6 +158,9 @@ export class LiveSessionController {
   #failure: Error | undefined;
   #muted = false;
   #awaitingUserSpeech = true;
+  #userHasSpoken = false;
+  #openingContext: string | undefined;
+  #heldMessages: LiveClientMessage[] = [];
   #phase: LivePhase = "connecting";
   #inputLevel = 0;
   #outputLevel = 0;
@@ -255,6 +258,8 @@ export class LiveSessionController {
       typeof chat === "function" ? chat() : (chat ?? ""),
     );
     this.#instructionsSent = instructions.length;
+    this.#openingContext = instructions;
+    this.#heldMessages = [];
     this.#awaitingUserSpeech = true;
     const session = ++this.#sessionNumber;
     const transport = this.#createTransport({
@@ -281,9 +286,8 @@ export class LiveSessionController {
     this.#sessionStartedAt ??= Date.now();
     this.#sessionLive = true;
     this.#touch();
-    // the endpoint does not act on the session's instructions (measured), but does on context
-    for (const chunk of chunkLiveContext(instructions))
-      this.#queueSend(buildSessionContextAppend(chunk, "commentary"));
+    // Only a call's first speech waits for memory; later sessions need the updated chat at once.
+    if (this.#userHasSpoken) this.#flushOpeningContext();
     this.#sayPendingResult();
     this.#refreshAudioPhase();
     this.#armTimer();
@@ -403,6 +407,7 @@ export class LiveSessionController {
     // A requested result must be heard even when no one spoke after reconnecting.
     this.#awaitingUserSpeech = false;
     this.#transport?.setPlaybackMuted?.(false);
+    this.#flushOpeningContext();
     for (const chunk of chunkLiveContext(context)) {
       this.#queueSend(buildSessionContextAppend(chunk, "speakable"));
     }
@@ -509,8 +514,10 @@ export class LiveSessionController {
 
   #hearUser(text: string): void {
     if (!this.#awaitingUserSpeech || !text.trim()) return;
+    this.#userHasSpoken = true;
     this.#awaitingUserSpeech = false;
     this.#transport?.setPlaybackMuted?.(false);
+    this.#flushOpeningContext();
   }
 
   #echoInstructions(echoed: string | undefined): void {
@@ -614,9 +621,25 @@ export class LiveSessionController {
     this.#emitTranscript({ role, turn, text: normalized, final });
   }
 
+  #flushOpeningContext(): void {
+    if (!this.#sessionLive || this.#openingContext === undefined) return;
+    const context = this.#openingContext;
+    const queued = this.#heldMessages;
+    this.#openingContext = undefined;
+    this.#heldMessages = [];
+    // The endpoint ignores session instructions, so memory must precede queued progress/results.
+    for (const chunk of chunkLiveContext(context))
+      this.#queueSend(buildSessionContextAppend(chunk, "commentary"));
+    for (const message of queued) this.#queueSend(message);
+  }
+
   #queueSend(message: LiveClientMessage): void {
     const transport = this.#transport;
     if (!transport || !this.#sessionLive || this.#stopped) return;
+    if (this.#openingContext !== undefined) {
+      this.#heldMessages.push(message);
+      return;
+    }
     this.#sendChain = this.#sendChain
       .then(async () => {
         if (!this.#stopped) await transport.send(message);
