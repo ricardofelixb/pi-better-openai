@@ -319,6 +319,8 @@ describe("parking", () => {
       "connect",
       "playback:false",
     ]);
+    // Result activity must refresh the idle deadline, not just opening the session.
+    await seconds(100);
     sessions[1]!.emit({ type: "output_transcript.added", item: { text: "There are" } });
     expect(onTranscript).toHaveBeenLastCalledWith({
       role: "assistant",
