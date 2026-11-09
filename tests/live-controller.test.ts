@@ -319,7 +319,7 @@ describe("LiveSessionController", () => {
     // the one-assistant and delegation rules stay
     expect(instructions).toContain("one assistant");
     expect(instructions).toContain("delegation");
-    // the guide's labeled sections, then its context pattern: current state, then background
+    // the guide's labeled sections, with current state last for recency
     const at = (heading: string) => instructions.indexOf(heading);
     for (const heading of [
       "# Role and Objective",
@@ -333,8 +333,8 @@ describe("LiveSessionController", () => {
     expect(at("## Context")).toBeLessThan(at("### Current State"));
     expect(instructions).toContain("Current State wins");
     expect(at("### Current State")).toBeGreaterThan(at("Never ask what they mean"));
-    expect(instructions.indexOf("### Current State")).toBeLessThan(
-      instructions.indexOf("### Historical or Background Sources"),
+    expect(instructions.indexOf("### Historical or Background Sources")).toBeLessThan(
+      instructions.indexOf("### Current State"),
     );
     await controller.stop();
   });
