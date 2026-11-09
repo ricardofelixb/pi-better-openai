@@ -155,6 +155,44 @@ test("gates playback and assistant transcripts until user speech, rearming on re
   await controller.stop();
 });
 
+test("holds queued chat behind opening memory and sends memory immediately on a spoken-call resume", async () => {
+  const { controller, sessions } = harness({
+    chat: "User: Is the image ready?",
+    parkAfterSeconds: 20,
+  });
+  await controller.start();
+  await settle();
+  const first = sessions[0]!;
+  expect(first.sent.length).toBe(0);
+  controller.handleAgentMessage({ role: "user", content: "Check the image." });
+  await settle();
+  expect(first.sent.length).toBe(0);
+
+  first.emit({ type: "input_transcript.added", item: { text: "Hello" } });
+  await settle();
+  const memory = chunkLiveContext(first.options.instructions).map((text) => ({
+    type: "session.context.append",
+    channel: "commentary",
+    content: [{ type: "input_text", text }],
+  }));
+  expect(first.sent.slice(0, memory.length)).toEqual(memory);
+  expect(sentAfterMemory(first)).toEqual([
+    {
+      type: "session.context.append",
+      content: [{ type: "input_text", text: expect.stringContaining("Check the image.") }],
+    },
+  ]);
+
+  first.emit(DELEGATION);
+  await seconds(20);
+  controller.resume();
+  await settle();
+  const second = sessions[1]!;
+  expect(second.calls).toEqual(["mute:false", "playback:true", "connect"]);
+  expect(second.sent).toEqual(memory);
+  await controller.stop();
+});
+
 describe("billed seconds", () => {
   test("follow the server's report and count the time since the last one when a session ends", async () => {
     const { controller, sessions, usage } = harness({ idleHangupSeconds: 0 });
@@ -476,6 +514,8 @@ describe("parking", () => {
       idleHangupSeconds: 0,
     });
     await controller.start();
+    await settle();
+    expect(sessions[0]!.sent.length).toBe(0);
     sessions[0]!.emit(DELEGATION);
     // the timer fires and the park starts; the agent settles before it has finished
     await vi.advanceTimersByTimeAsync(20_000);
@@ -483,7 +523,16 @@ describe("parking", () => {
     controller.handleAgentSettled();
     await settle();
     expect(sessions).toHaveLength(2);
+    expect(sessions[1]!.calls.at(-1)).toBe("playback:false");
+    expect(sessions[1]!.sent.slice(0, -1)).toEqual(
+      chunkLiveContext(sessions[1]!.options.instructions).map((text) => ({
+        type: "session.context.append",
+        channel: "commentary",
+        content: [{ type: "input_text", text }],
+      })),
+    );
     expect(sentAfterMemory(sessions[1]!)).toHaveLength(1);
+    expect(sentAfterMemory(sessions[1]!)[0]).toMatchObject({ channel: "speakable" });
   });
 
   test("ending a parked call is a normal stop that closes nothing twice", async () => {
