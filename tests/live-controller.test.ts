@@ -466,6 +466,10 @@ describe("LiveSessionController", () => {
     finishConnect?.();
     await start;
     expect(controller.phase).toBe("listening");
+    transportOptions?.callbacks.onEvent({
+      type: "input_transcript.added",
+      item: { text: "Hello" },
+    });
     transportOptions?.callbacks.onLevels(0.1, 0.5);
     expect(onLevels).toHaveBeenLastCalledWith(0.1, 0.5);
     expect(controller.phase).toBe("speaking");
@@ -505,6 +509,10 @@ describe("LiveSessionController", () => {
 
     await controller.start();
     expect(setMuted).toHaveBeenLastCalledWith(false);
+    transportOptions?.callbacks.onEvent({
+      type: "input_transcript.added",
+      item: { text: "Hello" },
+    });
     transportOptions?.callbacks.onLevels(0.4, 0.2);
     controller.toggleMute();
     expect(controller.muted).toBe(true);

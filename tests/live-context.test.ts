@@ -1,5 +1,10 @@
 import { describe, expect, test } from "vitest";
-import { LIVE_DELEGATION_MESSAGE_TYPE, recentChat, withChat } from "../src/live/context.ts";
+import {
+  LIVE_DELEGATION_MESSAGE_TYPE,
+  LIVE_TRANSCRIPT_MESSAGE_TYPE,
+  recentChat,
+  withChat,
+} from "../src/live/context.ts";
 
 const message = (role: string, content: unknown, extra: Record<string, unknown> = {}) => ({
   type: "message",
@@ -32,6 +37,35 @@ test("the voice gets the conversation, not the work behind it", () => {
       "User (by voice): Merge it.",
     ].join("\n\n"),
   );
+});
+
+test("saved calls contribute only user turns, including their continuation lines", () => {
+  const content = [
+    "Live voice call:",
+    "Assistant: Good morning",
+    "More unsolicited filler",
+    "User: Check the build",
+    "and the tests.",
+    "Assistant: I'll look into that with you",
+    "Still the voice speaking",
+    "User: Thanks",
+  ].join("\n");
+  const expected = "Live voice call:\nUser: Check the build\nand the tests.\nUser: Thanks";
+  for (const entry of [
+    { type: "custom_message", customType: LIVE_TRANSCRIPT_MESSAGE_TYPE, content },
+    message("custom", content, { customType: LIVE_TRANSCRIPT_MESSAGE_TYPE }),
+  ]) {
+    expect(recentChat([entry])).toBe(expected);
+  }
+  expect(
+    recentChat([
+      {
+        type: "custom_message",
+        customType: LIVE_TRANSCRIPT_MESSAGE_TYPE,
+        content: "Live voice call:\nAssistant: I'm ChatGPT",
+      },
+    ]),
+  ).toBe("");
 });
 
 test("over the budget, the newest turns stay", () => {

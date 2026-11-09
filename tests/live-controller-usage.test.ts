@@ -64,6 +64,7 @@ function harness(overrides: Partial<LiveSessionControllerOptions> = {}) {
         connect: vi.fn(async () => void session.calls.push("connect")),
         send: vi.fn(async (message: LiveClientMessage) => void session.sent.push(message)),
         setMuted: vi.fn((muted: boolean) => void session.calls.push(`mute:${muted}`)),
+        setPlaybackMuted: vi.fn((muted: boolean) => void session.calls.push(`playback:${muted}`)),
         close: vi.fn(async () => void (session.closed = true)),
         park: vi.fn(async () => void (session.parked = true)),
       };
@@ -91,6 +92,68 @@ const seconds = async (count: number) => {
 
 beforeEach(() => vi.useFakeTimers());
 afterEach(() => vi.useRealTimers());
+
+test("gates playback and assistant transcripts until user speech, rearming on resume", async () => {
+  const onTranscript = vi.fn();
+  const onLevels = vi.fn();
+  const { controller, sessions } = harness({
+    parkAfterSeconds: 20,
+    callbacks: { onPhase: vi.fn(), onLevels, onTranscript, onTerminal: vi.fn() },
+  });
+  await controller.start();
+  const first = sessions[0]!;
+  expect(first.calls).toEqual(["mute:false", "playback:true", "connect"]);
+  first.emit({ type: "output_audio.delta", audio: "startup" });
+  first.options.callbacks.onLevels(0, 0.8);
+  first.emit({ type: "output_transcript.added", item: { text: "Good morning" } });
+  first.emit({ type: "turn.done", turn: { role: "assistant", transcript: "I'm ChatGPT" } });
+  expect(onTranscript.mock.calls).toEqual([[undefined]]);
+  expect(onLevels).toHaveBeenLastCalledWith(0, 0);
+  expect(controller.phase).toBe("listening");
+  first.emit({ type: "input_transcript.added", item: { text: "" } });
+  expect(first.calls).not.toContain("playback:false");
+
+  first.emit({ type: "input_transcript.added", item: { text: "Hello" } });
+  first.emit({ type: "input_transcript.added", item: { text: "Hello there" } });
+  expect(first.calls.filter((call) => call === "playback:false")).toHaveLength(1);
+  first.emit({ type: "output_transcript.added", item: { text: "Hi" } });
+  first.emit({ type: "turn.done", turn: { role: "assistant", transcript: "Hi there" } });
+  expect(onTranscript).toHaveBeenLastCalledWith({
+    role: "assistant",
+    text: "Hi there",
+    turn: 1,
+    final: true,
+  });
+  first.options.callbacks.onLevels(0.1, 0.5);
+  expect(onLevels).toHaveBeenLastCalledWith(0.1, 0.5);
+
+  first.emit(DELEGATION);
+  await seconds(20);
+  expect(controller.phase).toBe("parked");
+  controller.resume();
+  await settle();
+  const second = sessions[1]!;
+  expect(second.calls).toEqual(["mute:false", "playback:true", "connect"]);
+  const count = onTranscript.mock.calls.length;
+  first.emit({ type: "input_transcript.added", item: { text: "stale speech" } });
+  second.emit({
+    type: "output_transcript.added",
+    item: { text: "Thanks, I'll look into that with you" },
+  });
+  second.emit({ type: "turn.done", turn: { role: "assistant", transcript: "In Ovis" } });
+  expect(onTranscript).toHaveBeenCalledTimes(count);
+  expect(second.calls).not.toContain("playback:false");
+  second.emit({ type: "input_transcript.added", item: { text: "Any news?" } });
+  expect(second.calls.at(-1)).toBe("playback:false");
+  second.emit({ type: "turn.done", turn: { role: "assistant", transcript: "Still working" } });
+  expect(onTranscript).toHaveBeenLastCalledWith({
+    role: "assistant",
+    text: "Still working",
+    turn: 2,
+    final: true,
+  });
+  await controller.stop();
+});
 
 describe("billed seconds", () => {
   test("follow the server's report and count the time since the last one when a session ends", async () => {
@@ -257,6 +320,7 @@ describe("parking", () => {
     await controller.start();
     sessions[0]!.emit(DELEGATION);
     await seconds(15);
+    sessions[0]!.emit({ type: "input_transcript.added", item: { text: "Any news?" } });
     sessions[0]!.emit({
       type: "output_transcript.added",
       item: { text: "Looking into it" },

@@ -26,6 +26,7 @@ export type ClientFrame =
   /** Close the peer connection and data channel and stop the levels; keep the microphone and the connection. */
   | { type: "park" }
   | { type: "mute"; muted: boolean }
+  | { type: "playback"; muted: boolean }
   | { type: "ping" }
   | { type: "close" };
 
@@ -89,6 +90,7 @@ const CLIENT_SHAPES = new Map<string, Shape>([
   ["close", {}],
   ["ping", {}],
   ["mute", { required: { muted: isBoolean } }],
+  ["playback", { required: { muted: isBoolean } }],
 ]);
 
 const REQUEST_SHAPES = new Map<string, Shape>([

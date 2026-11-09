@@ -138,6 +138,7 @@ export class CodexLiveTransport {
   #closePromise: Promise<void> | undefined;
   #sendTail: Promise<void> = Promise.resolve();
   #muted = false;
+  #playbackMuted = false;
   #unexpectedFailureReported = false;
 
   constructor(options: LiveTransportOptions) {
@@ -182,6 +183,7 @@ export class CodexLiveTransport {
     );
     this.#media = media;
     media.setMuted(this.#muted);
+    media.setPlaybackMuted(this.#playbackMuted);
     const offer = await media.createOffer();
     if (this.#state !== "connecting") throw abortReason(this.#operationSignal);
     const signaling = await this.#signal(offer);
@@ -426,6 +428,11 @@ export class CodexLiveTransport {
   setMuted(muted: boolean): void {
     this.#muted = muted;
     this.#media?.setMuted(muted);
+  }
+
+  setPlaybackMuted(muted: boolean): void {
+    this.#playbackMuted = muted;
+    this.#media?.setPlaybackMuted(muted);
   }
 
   close(): Promise<void> {

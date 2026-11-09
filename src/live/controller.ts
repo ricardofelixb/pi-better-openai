@@ -76,6 +76,8 @@ export interface LiveTransport {
   connect(): Promise<void>;
   send(message: LiveClientMessage): Promise<void>;
   setMuted(muted: boolean): void;
+  /** Absent on transports without playback control. */
+  setPlaybackMuted?(muted: boolean): void;
   close(): Promise<void>;
   /** Like close, but media that can wait keeps its devices for the next session. */
   park?(): Promise<void>;
@@ -155,6 +157,7 @@ export class LiveSessionController {
   #terminalEmitted = false;
   #failure: Error | undefined;
   #muted = false;
+  #awaitingUserSpeech = true;
   #phase: LivePhase = "connecting";
   #inputLevel = 0;
   #outputLevel = 0;
@@ -252,6 +255,7 @@ export class LiveSessionController {
       typeof chat === "function" ? chat() : (chat ?? ""),
     );
     this.#instructionsSent = instructions.length;
+    this.#awaitingUserSpeech = true;
     const session = ++this.#sessionNumber;
     const transport = this.#createTransport({
       getCredentials: this.#options.getCredentials,
@@ -270,6 +274,7 @@ export class LiveSessionController {
     this.#transport = transport;
     // before connecting, which is what opens the microphone: a muted call is never heard unmuted
     transport.setMuted(this.#muted);
+    transport.setPlaybackMuted?.(true);
     await transport.connect();
     if (this.#stopped)
       throw this.#failure ?? new Error("The live session stopped while connecting.");
@@ -465,14 +470,18 @@ export class LiveSessionController {
         this.#emitUsage();
         break;
       case "input_transcript.added":
+        this.#hearUser(event.item.text);
         this.#touch();
         this.#addTranscript("user", event.item.text);
         break;
       case "output_transcript.added":
+        if (this.#awaitingUserSpeech) break;
         this.#touch();
         this.#addTranscript("assistant", event.item.text);
         break;
       case "turn.done":
+        if (event.turn.role === "user") this.#hearUser(event.turn.transcript);
+        else if (this.#awaitingUserSpeech) break;
         this.#touch();
         this.#finishTranscript(event.turn.role, event.turn.transcript);
         break;
@@ -487,11 +496,18 @@ export class LiveSessionController {
         this.#touch();
         break;
       case "output_audio.delta":
+        if (this.#awaitingUserSpeech) break;
         this.#touch();
         break;
       case "unknown":
         break;
     }
+  }
+
+  #hearUser(text: string): void {
+    if (!this.#awaitingUserSpeech || !text.trim()) return;
+    this.#awaitingUserSpeech = false;
+    this.#transport?.setPlaybackMuted?.(false);
   }
 
   #echoInstructions(echoed: string | undefined): void {
@@ -523,6 +539,7 @@ export class LiveSessionController {
   }
 
   #handleLevels(input: number, output: number): void {
+    if (this.#awaitingUserSpeech) output = 0;
     const outputChanged = output !== this.#outputLevel;
     this.#inputLevel = input;
     this.#outputLevel = output;
