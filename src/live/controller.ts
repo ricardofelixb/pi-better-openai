@@ -400,6 +400,9 @@ export class LiveSessionController {
 
   /** The result of work the session did not hear started, as context the voice says unprompted. */
   #sayResult(context: string): void {
+    // A requested result must be heard even when no one spoke after reconnecting.
+    this.#awaitingUserSpeech = false;
+    this.#transport?.setPlaybackMuted?.(false);
     for (const chunk of chunkLiveContext(context)) {
       this.#queueSend(buildSessionContextAppend(chunk, "speakable"));
     }
