@@ -162,9 +162,6 @@ export class LiveSessionController {
   #failure: Error | undefined;
   #muted = false;
   #awaitingUserSpeech = true;
-  #userHasSpoken = false;
-  #openingContext: string | undefined;
-  #heldMessages: LiveClientMessage[] = [];
   #phase: LivePhase = "connecting";
   #inputLevel = 0;
   #levelsReceived = false;
@@ -264,8 +261,6 @@ export class LiveSessionController {
       typeof chat === "function" ? chat() : (chat ?? ""),
     );
     this.#instructionsSent = instructions.length;
-    this.#openingContext = instructions;
-    this.#heldMessages = [];
     this.#awaitingUserSpeech = true;
     this.#levelsReceived = false;
     this.#lastInputSpeechAt = Number.NEGATIVE_INFINITY;
@@ -294,8 +289,9 @@ export class LiveSessionController {
     this.#sessionStartedAt ??= Date.now();
     this.#sessionLive = true;
     this.#touch();
-    // Only a call's first speech waits for memory; later sessions need the updated chat at once.
-    if (this.#userHasSpoken) this.#flushOpeningContext();
+    // The endpoint ignores session instructions, so send them before any progress/results.
+    for (const chunk of chunkLiveContext(instructions))
+      this.#queueSend(buildSessionContextAppend(chunk, "commentary"));
     this.#sayPendingResult();
     this.#refreshAudioPhase();
     this.#armTimer();
@@ -415,7 +411,6 @@ export class LiveSessionController {
     // A requested result must be heard even when no one spoke after reconnecting.
     this.#awaitingUserSpeech = false;
     this.#transport?.setPlaybackMuted?.(false);
-    this.#flushOpeningContext();
     for (const chunk of chunkLiveContext(context)) {
       this.#queueSend(buildSessionContextAppend(chunk, "speakable"));
     }
@@ -525,11 +520,9 @@ export class LiveSessionController {
     // Missing telemetry keeps the transcript-only fallback; measured silence does not.
     if (this.#levelsReceived && Date.now() - this.#lastInputSpeechAt > INPUT_SPEECH_WINDOW_MS)
       return;
-    this.#userHasSpoken = true;
     if (!this.#awaitingUserSpeech) return;
     this.#awaitingUserSpeech = false;
     this.#transport?.setPlaybackMuted?.(false);
-    this.#flushOpeningContext();
   }
 
   #echoInstructions(echoed: string | undefined): void {
@@ -635,25 +628,9 @@ export class LiveSessionController {
     this.#emitTranscript({ role, turn, text: normalized, final });
   }
 
-  #flushOpeningContext(): void {
-    if (!this.#sessionLive || this.#openingContext === undefined) return;
-    const context = this.#openingContext;
-    const queued = this.#heldMessages;
-    this.#openingContext = undefined;
-    this.#heldMessages = [];
-    // The endpoint ignores session instructions, so memory must precede queued progress/results.
-    for (const chunk of chunkLiveContext(context))
-      this.#queueSend(buildSessionContextAppend(chunk, "commentary"));
-    for (const message of queued) this.#queueSend(message);
-  }
-
   #queueSend(message: LiveClientMessage): void {
     const transport = this.#transport;
     if (!transport || !this.#sessionLive || this.#stopped) return;
-    if (this.#openingContext !== undefined) {
-      this.#heldMessages.push(message);
-      return;
-    }
     this.#sendChain = this.#sendChain
       .then(async () => {
         if (!this.#stopped) await transport.send(message);
