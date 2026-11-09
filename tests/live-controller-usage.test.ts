@@ -113,6 +113,7 @@ test("gates playback and assistant transcripts until user speech, rearming on re
   first.emit({ type: "input_transcript.added", item: { text: "" } });
   expect(first.calls).not.toContain("playback:false");
 
+  first.options.callbacks.onLevels(0.1, 0);
   first.emit({ type: "input_transcript.added", item: { text: "Hello" } });
   first.emit({ type: "input_transcript.added", item: { text: "Hello there" } });
   expect(first.calls.filter((call) => call === "playback:false")).toHaveLength(1);
@@ -154,6 +155,61 @@ test("gates playback and assistant transcripts until user speech, rearming on re
   });
   await controller.stop();
 });
+
+test.each(["input_transcript.added", "turn.done"] as const)(
+  "requires recent microphone speech before opening the gate on %s",
+  async (type) => {
+    const onTranscript = vi.fn();
+    const { controller, sessions } = harness({
+      callbacks: { onPhase: vi.fn(), onLevels: vi.fn(), onTranscript, onTerminal: vi.fn() },
+    });
+    const transcript = (text: string): LiveServerEvent =>
+      type === "turn.done"
+        ? { type, turn: { role: "user", transcript: text } }
+        : { type, item: { text } };
+    await controller.start();
+    const first = sessions[0]!;
+    first.options.callbacks.onLevels(0, 0);
+    first.emit(transcript("the image displays"));
+    const count = onTranscript.mock.calls.length;
+    first.emit({ type: "output_transcript.added", item: { text: "Sure thing" } });
+    first.emit({ type: "turn.done", turn: { role: "assistant", transcript: "Sure thing" } });
+    expect(onTranscript).toHaveBeenCalledTimes(count);
+    expect(first.calls).not.toContain("playback:false");
+
+    first.options.callbacks.onLevels(0.04, 0);
+    first.emit(transcript("Okay"));
+    expect(first.calls).not.toContain("playback:false");
+    first.options.callbacks.onLevels(0.1, 0);
+    first.options.callbacks.onLevels(0, 0);
+    await seconds(3);
+    first.emit(transcript("Okay"));
+    expect(first.calls).not.toContain("playback:false");
+    expect(first.sent.length).toBe(0);
+
+    first.options.callbacks.onLevels(0.1, 0);
+    first.options.callbacks.onLevels(0, 0);
+    await seconds(2);
+    first.emit(transcript("Is it ready?"));
+    await settle();
+    expect(first.calls.at(-1)).toBe("playback:false");
+    expect(first.sent).toEqual(
+      chunkLiveContext(first.options.instructions).map((text) => ({
+        type: "session.context.append",
+        channel: "commentary",
+        content: [{ type: "input_text", text }],
+      })),
+    );
+    first.emit({ type: "turn.done", turn: { role: "assistant", transcript: "It is ready." } });
+    expect(onTranscript).toHaveBeenLastCalledWith({
+      role: "assistant",
+      text: "It is ready.",
+      turn: 1,
+      final: true,
+    });
+    await controller.stop();
+  },
+);
 
 test("holds queued chat behind opening memory and sends memory immediately on a spoken-call resume", async () => {
   const { controller, sessions } = harness({
