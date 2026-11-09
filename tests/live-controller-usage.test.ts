@@ -156,6 +156,60 @@ test("gates playback and assistant transcripts until user speech, rearming on re
   await controller.stop();
 });
 
+test.each(["audio", "transcript", "levels"] as const)(
+  "never opens playback midway through an opening response detected by %s",
+  async (signal) => {
+    const onTranscript = vi.fn();
+    const onLevels = vi.fn();
+    const { controller, sessions } = harness({
+      parkAfterSeconds: 20,
+      callbacks: { onPhase: vi.fn(), onLevels, onTranscript, onTerminal: vi.fn() },
+    });
+    await controller.start();
+    for (const connection of [0, 1]) {
+      const session = sessions[connection]!;
+      const count = onTranscript.mock.calls.length;
+      const question = connection === 0 ? "Hey, what's new?" : "Any news?";
+      if (signal === "audio") session.emit({ type: "output_audio.delta", audio: "old" });
+      else if (signal === "transcript")
+        session.emit({ type: "output_transcript.added", item: { text: "Old chat recap" } });
+      else session.options.callbacks.onLevels(0, 0.8);
+      session.options.callbacks.onLevels(0.1, 0.8);
+      session.emit({ type: "input_transcript.added", item: { text: question } });
+      session.emit({ type: "turn.done", turn: { role: "user", transcript: question } });
+      expect(session.calls).not.toContain("playback:false");
+      session.emit({ type: "output_audio.delta", audio: "still-old" });
+      session.emit({ type: "output_transcript.added", item: { text: "Read the old chat" } });
+      session.emit({ type: "turn.done", turn: { role: "assistant", transcript: "Old recap" } });
+      expect(onTranscript.mock.calls.slice(count)).toEqual([
+        [{ role: "user", text: question, turn: connection + 1, final: false }],
+        [{ role: "user", text: question, turn: connection + 1, final: true }],
+      ]);
+      expect(onLevels).toHaveBeenLastCalledWith(0.1, 0);
+      expect(session.calls).not.toContain("playback:false");
+
+      session.emit({ type: "output_audio.delta", audio: "answer-to-user" });
+      expect(session.calls.at(-1)).toBe("playback:false");
+      const answer = connection === 0 ? "We fixed voice startup." : "Still working.";
+      session.emit({ type: "output_transcript.added", item: { text: answer } });
+      session.emit({ type: "turn.done", turn: { role: "assistant", transcript: answer } });
+      expect(onTranscript).toHaveBeenLastCalledWith({
+        role: "assistant",
+        text: answer,
+        turn: connection + 1,
+        final: true,
+      });
+      if (connection === 0) {
+        session.emit(DELEGATION);
+        await seconds(20);
+        controller.resume();
+        await settle();
+      }
+    }
+    await controller.stop();
+  },
+);
+
 test.each(["input_transcript.added", "turn.done"] as const)(
   "requires recent microphone speech before opening the gate on %s",
   async (type) => {
