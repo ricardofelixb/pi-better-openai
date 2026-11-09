@@ -113,6 +113,7 @@ test("gates playback and assistant transcripts until user speech, rearming on re
   first.emit({ type: "input_transcript.added", item: { text: "" } });
   expect(first.calls).not.toContain("playback:false");
 
+  first.options.callbacks.onLevels(0.1, 0);
   first.emit({ type: "input_transcript.added", item: { text: "Hello" } });
   first.emit({ type: "input_transcript.added", item: { text: "Hello there" } });
   expect(first.calls.filter((call) => call === "playback:false")).toHaveLength(1);
@@ -152,6 +153,99 @@ test("gates playback and assistant transcripts until user speech, rearming on re
     turn: 2,
     final: true,
   });
+  await controller.stop();
+});
+
+test.each(["input_transcript.added", "turn.done"] as const)(
+  "requires recent microphone speech before opening the gate on %s",
+  async (type) => {
+    const onTranscript = vi.fn();
+    const { controller, sessions } = harness({
+      callbacks: { onPhase: vi.fn(), onLevels: vi.fn(), onTranscript, onTerminal: vi.fn() },
+    });
+    const transcript = (text: string): LiveServerEvent =>
+      type === "turn.done"
+        ? { type, turn: { role: "user", transcript: text } }
+        : { type, item: { text } };
+    await controller.start();
+    const first = sessions[0]!;
+    first.options.callbacks.onLevels(0, 0);
+    first.emit(transcript("the image displays"));
+    const count = onTranscript.mock.calls.length;
+    first.emit({ type: "output_transcript.added", item: { text: "Sure thing" } });
+    first.emit({ type: "turn.done", turn: { role: "assistant", transcript: "Sure thing" } });
+    expect(onTranscript).toHaveBeenCalledTimes(count);
+    expect(first.calls).not.toContain("playback:false");
+
+    first.options.callbacks.onLevels(0.04, 0);
+    first.emit(transcript("Okay"));
+    expect(first.calls).not.toContain("playback:false");
+    first.options.callbacks.onLevels(0.1, 0);
+    first.options.callbacks.onLevels(0, 0);
+    await seconds(3);
+    first.emit(transcript("Okay"));
+    expect(first.calls).not.toContain("playback:false");
+    expect(first.sent.length).toBe(0);
+
+    first.options.callbacks.onLevels(0.1, 0);
+    first.options.callbacks.onLevels(0, 0);
+    await seconds(2);
+    first.emit(transcript("Is it ready?"));
+    await settle();
+    expect(first.calls.at(-1)).toBe("playback:false");
+    expect(first.sent).toEqual(
+      chunkLiveContext(first.options.instructions).map((text) => ({
+        type: "session.context.append",
+        channel: "commentary",
+        content: [{ type: "input_text", text }],
+      })),
+    );
+    first.emit({ type: "turn.done", turn: { role: "assistant", transcript: "It is ready." } });
+    expect(onTranscript).toHaveBeenLastCalledWith({
+      role: "assistant",
+      text: "It is ready.",
+      turn: 1,
+      final: true,
+    });
+    await controller.stop();
+  },
+);
+
+test("holds queued chat behind opening memory and sends memory immediately on a spoken-call resume", async () => {
+  const { controller, sessions } = harness({
+    chat: "User: Is the image ready?",
+    parkAfterSeconds: 20,
+  });
+  await controller.start();
+  await settle();
+  const first = sessions[0]!;
+  expect(first.sent.length).toBe(0);
+  controller.handleAgentMessage({ role: "user", content: "Check the image." });
+  await settle();
+  expect(first.sent.length).toBe(0);
+
+  first.emit({ type: "input_transcript.added", item: { text: "Hello" } });
+  await settle();
+  const memory = chunkLiveContext(first.options.instructions).map((text) => ({
+    type: "session.context.append",
+    channel: "commentary",
+    content: [{ type: "input_text", text }],
+  }));
+  expect(first.sent.slice(0, memory.length)).toEqual(memory);
+  expect(sentAfterMemory(first)).toEqual([
+    {
+      type: "session.context.append",
+      content: [{ type: "input_text", text: expect.stringContaining("Check the image.") }],
+    },
+  ]);
+
+  first.emit(DELEGATION);
+  await seconds(20);
+  controller.resume();
+  await settle();
+  const second = sessions[1]!;
+  expect(second.calls).toEqual(["mute:false", "playback:true", "connect"]);
+  expect(second.sent).toEqual(memory);
   await controller.stop();
 });
 
@@ -476,6 +570,8 @@ describe("parking", () => {
       idleHangupSeconds: 0,
     });
     await controller.start();
+    await settle();
+    expect(sessions[0]!.sent.length).toBe(0);
     sessions[0]!.emit(DELEGATION);
     // the timer fires and the park starts; the agent settles before it has finished
     await vi.advanceTimersByTimeAsync(20_000);
@@ -483,7 +579,28 @@ describe("parking", () => {
     controller.handleAgentSettled();
     await settle();
     expect(sessions).toHaveLength(2);
+    expect(sessions[1]!.calls.at(-1)).toBe("playback:false");
+    expect(sessions[1]!.sent.slice(0, -1)).toEqual(
+      chunkLiveContext(sessions[1]!.options.instructions).map((text) => ({
+        type: "session.context.append",
+        channel: "commentary",
+        content: [{ type: "input_text", text }],
+      })),
+    );
     expect(sentAfterMemory(sessions[1]!)).toHaveLength(1);
+    expect(sentAfterMemory(sessions[1]!)[0]).toMatchObject({ channel: "speakable" });
+
+    // Speech after the requested result still counts for memory on the next resume.
+    sessions[1]!.options.callbacks.onLevels(0.1, 0);
+    sessions[1]!.emit({ type: "input_transcript.added", item: { text: "Thanks. Count again." } });
+    sessions[1]!.emit(DELEGATION);
+    await seconds(20);
+    controller.resume();
+    await settle();
+    expect(sessions).toHaveLength(3);
+    expect(sessions[2]!.sent.length).toBe(
+      chunkLiveContext(sessions[2]!.options.instructions).length,
+    );
   });
 
   test("ending a parked call is a normal stop that closes nothing twice", async () => {

@@ -75,6 +75,14 @@ describe("LiveSessionController", () => {
     await controller.start();
     expect(transportOptions?.voice).toBe("vale");
     transportOptions?.callbacks.onEvent({
+      type: "input_transcript.added",
+      item: { text: "Run" },
+    });
+    transportOptions?.callbacks.onEvent({
+      type: "turn.done",
+      turn: { role: "user", transcript: "Run the tests." },
+    });
+    transportOptions?.callbacks.onEvent({
       type: "delegation.created",
       item: {
         type: "delegation",
@@ -118,14 +126,6 @@ describe("LiveSessionController", () => {
     });
     expect(controller.activeDelegationId).toBeUndefined();
 
-    transportOptions?.callbacks.onEvent({
-      type: "input_transcript.added",
-      item: { text: "Run" },
-    });
-    transportOptions?.callbacks.onEvent({
-      type: "turn.done",
-      turn: { role: "user", transcript: "Run the tests." },
-    });
     expect(transcripts.at(-1)).toEqual({
       role: "user",
       text: "Run the tests.",
@@ -172,6 +172,10 @@ describe("LiveSessionController", () => {
     expect(transportOptions?.instructions).toContain("### Historical or Background Sources");
     expect(transportOptions?.instructions).toContain("User: My dog is called Biscuit.");
 
+    transportOptions?.callbacks.onEvent({
+      type: "input_transcript.added",
+      item: { text: "Hello" },
+    });
     controller.handleAgentMessage({ role: "user", content: "Run the build." });
     controller.handleAgentMessage({
       role: "assistant",
@@ -225,7 +229,7 @@ describe("LiveSessionController", () => {
     await controller.stop();
   });
 
-  test("sends the instructions and the chat as silent context too, because the endpoint ignores the instructions", async () => {
+  test("holds the silent instructions and chat until user speech when levels are unavailable", async () => {
     let transportOptions: LiveTransportOptions | undefined;
     const send = vi.fn(async (_message: LiveClientMessage) => undefined);
     const controller = new LiveSessionController({
@@ -259,6 +263,12 @@ describe("LiveSessionController", () => {
     const instructions = transportOptions?.instructions ?? "";
     const chunks = chunkLiveContext(instructions);
     expect(chunks.length).toBeGreaterThan(1);
+    expect(send.mock.calls.length).toBe(0);
+    transportOptions?.callbacks.onEvent({
+      type: "input_transcript.added",
+      item: { text: "Is it ready?" },
+    });
+    await flushSends();
     expect(send.mock.calls.map(([message]) => message)).toEqual(
       chunks.map((text) => ({
         type: "session.context.append",

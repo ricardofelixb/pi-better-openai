@@ -1,7 +1,7 @@
 import type { LiveAudioCapture, LiveNativeBindings, LiveWebRtcPeerInstance } from "./native.ts";
 
 export const OUTPUT_ACTIVE_LEVEL = 0.015;
-const MIN_BARGE_IN_LEVEL = 0.04;
+export const INPUT_ACTIVE_LEVEL = 0.04;
 const OUTPUT_ECHO_RATIO = 0.65;
 const DIGITAL_SILENCE_SAMPLE_LIMIT = 32_000;
 const CAPTURE_SAMPLE_RATE = 16_000;
@@ -183,7 +183,7 @@ export class LocalLiveMedia implements LiveMedia {
     this.#inputLevel = microphoneLevel(samples);
     this.#callbacks.onLevels(this.#inputLevel, this.#outputLevel);
     const outputActive = this.#outputLevel > OUTPUT_ACTIVE_LEVEL;
-    const echoThreshold = Math.max(MIN_BARGE_IN_LEVEL, this.#outputLevel * OUTPUT_ECHO_RATIO);
+    const echoThreshold = Math.max(INPUT_ACTIVE_LEVEL, this.#outputLevel * OUTPUT_ECHO_RATIO);
     if (!this.#active || samples.length === 0) return;
     if (outputActive && this.#inputLevel < echoThreshold) return;
     try {
