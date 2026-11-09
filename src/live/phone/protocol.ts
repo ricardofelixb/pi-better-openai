@@ -71,6 +71,7 @@ export const CALL_FRAME_TYPES: ReadonlySet<string> = new Set([
   "activate",
   "park",
   "mute",
+  "playback",
   "ping",
   "close",
   "ready",

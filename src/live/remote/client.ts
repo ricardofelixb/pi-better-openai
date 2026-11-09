@@ -102,6 +102,7 @@ class RemoteLiveMedia implements LiveMedia {
   #resolveExited!: () => void;
   #hello!: { resolve(): void; reject(error: Error): void; timer: NodeJS.Timeout };
   #helloSeen = false;
+  #supportsPlayback = false;
   #nextId = 1;
   #closed = false;
   readonly #parkable: boolean;
@@ -221,6 +222,10 @@ class RemoteLiveMedia implements LiveMedia {
     this.#notify({ type: "mute", muted });
   }
 
+  setPlaybackMuted(muted: boolean): void {
+    this.#notify({ type: "playback", muted });
+  }
+
   /**
    * Has the host drop its peer connection and levels while keeping its microphone and the
    * connection to Pi. Nothing it says meanwhile reaches a session, and a failure ends the media.
@@ -267,7 +272,8 @@ class RemoteLiveMedia implements LiveMedia {
   #notify(frame: ClientFrame): void {
     void this.#ready.then(
       () => {
-        if (!this.#closed) this.#write(frame);
+        if (!this.#closed && (frame.type !== "playback" || this.#supportsPlayback))
+          this.#write(frame);
       },
       () => undefined,
     );
@@ -326,6 +332,7 @@ class RemoteLiveMedia implements LiveMedia {
         );
         return;
       }
+      this.#supportsPlayback = frame.features?.includes("playback") ?? false;
       this.#helloSeen = true;
       clearTimeout(this.#hello.timer);
       this.#hello.resolve();

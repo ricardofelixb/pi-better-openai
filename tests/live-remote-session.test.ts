@@ -33,6 +33,7 @@ function fakeMedia() {
     waitForOpen: vi.fn(async (timeoutMs?: number) => void calls.push(["waitForOpen", timeoutMs])),
     activate: vi.fn(() => void calls.push(["activate"])),
     setMuted: vi.fn((muted: boolean) => void calls.push(["setMuted", muted])),
+    setPlaybackMuted: vi.fn(),
     close: vi.fn(async () => void calls.push(["close"])),
   };
   const createMedia = vi.fn((next: LiveMediaCallbacks, signal?: AbortSignal) => {

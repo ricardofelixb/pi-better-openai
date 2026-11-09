@@ -25,6 +25,8 @@ export interface LiveMedia {
   /** Starts forwarding the microphone once the session is connected. */
   activate(): void;
   setMuted(muted: boolean): void;
+  /** Silences received audio independently of the microphone, when supported by the host. */
+  setPlaybackMuted(muted: boolean): void;
   close(): Promise<void>;
   /**
    * Gives up the peer connection but keeps the devices, for a later session to take over. Absent
@@ -120,6 +122,10 @@ export class LocalLiveMedia implements LiveMedia {
     this.#muted = muted;
     if (muted) this.#inputLevel = 0;
     if (this.#answered && !this.#closed) this.#peer.setMuted(muted);
+  }
+
+  setPlaybackMuted(_muted: boolean): void {
+    // The native binding only exposes microphone mute, not playback control.
   }
 
   close(): Promise<void> {
