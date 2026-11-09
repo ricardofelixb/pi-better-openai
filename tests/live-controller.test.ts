@@ -316,6 +316,11 @@ describe("LiveSessionController", () => {
     expect(instructions).toContain("your own memory");
     expect(instructions).toContain("is it fixed");
     expect(instructions).toContain("Never ask what they mean");
+    expect(instructions).toContain("For greetings or small talk, reply briefly in kind");
+    expect(instructions).toContain(
+      "do not recap the chat or bring up a topic the user did not raise",
+    );
+    expect(instructions).toContain("If asked what's new, use the newest turns in Current State");
     // the one-assistant and delegation rules stay
     expect(instructions).toContain("one assistant");
     expect(instructions).toContain("delegation");
