@@ -1,6 +1,6 @@
 import type { CodexCredentials } from "../codex-auth.ts";
 import { typedContext, withChat } from "./context.ts";
-import { type LiveMediaFactory, OUTPUT_ACTIVE_LEVEL } from "./media.ts";
+import { INPUT_ACTIVE_LEVEL, type LiveMediaFactory, OUTPUT_ACTIVE_LEVEL } from "./media.ts";
 import { loadLiveNative, type LiveNativeBindings } from "./native.ts";
 import {
   buildDelegationContextAppend,
@@ -12,6 +12,8 @@ import {
 } from "./protocol.ts";
 import { CodexLiveTransport, type LiveTransportOptions } from "./transport.ts";
 import { DEFAULT_LIVE_VOICE } from "./voices.ts";
+
+const INPUT_SPEECH_WINDOW_MS = 2_000;
 
 const LIVE_INSTRUCTIONS = `# Role and Objective
 You are Better OpenAI Live, the voice of the same assistant the user has been chatting with in this session's text pane, which is also a coding assistant. You and that chat are one assistant with one memory, not separate agents. The chat in the Context below is your own memory of what you and the user said and did, not background about someone else. Never say you don't have the earlier chat or ask the user to repeat it.
@@ -163,6 +165,8 @@ export class LiveSessionController {
   #heldMessages: LiveClientMessage[] = [];
   #phase: LivePhase = "connecting";
   #inputLevel = 0;
+  #levelsReceived = false;
+  #lastInputSpeechAt = Number.NEGATIVE_INFINITY;
   #outputLevel = 0;
   #activeDelegationId: string | undefined;
   #pendingAgentFinal = "";
@@ -261,6 +265,8 @@ export class LiveSessionController {
     this.#openingContext = instructions;
     this.#heldMessages = [];
     this.#awaitingUserSpeech = true;
+    this.#levelsReceived = false;
+    this.#lastInputSpeechAt = Number.NEGATIVE_INFINITY;
     const session = ++this.#sessionNumber;
     const transport = this.#createTransport({
       getCredentials: this.#options.getCredentials,
@@ -513,8 +519,12 @@ export class LiveSessionController {
   }
 
   #hearUser(text: string): void {
-    if (!this.#awaitingUserSpeech || !text.trim()) return;
+    if (!text.trim()) return;
+    // Missing telemetry keeps the transcript-only fallback; measured silence does not.
+    if (this.#levelsReceived && Date.now() - this.#lastInputSpeechAt > INPUT_SPEECH_WINDOW_MS)
+      return;
     this.#userHasSpoken = true;
+    if (!this.#awaitingUserSpeech) return;
     this.#awaitingUserSpeech = false;
     this.#transport?.setPlaybackMuted?.(false);
     this.#flushOpeningContext();
@@ -549,6 +559,8 @@ export class LiveSessionController {
   }
 
   #handleLevels(input: number, output: number): void {
+    this.#levelsReceived = true;
+    if (!this.#muted && input > INPUT_ACTIVE_LEVEL) this.#lastInputSpeechAt = Date.now();
     if (this.#awaitingUserSpeech) output = 0;
     const outputChanged = output !== this.#outputLevel;
     this.#inputLevel = input;
