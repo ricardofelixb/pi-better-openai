@@ -162,6 +162,8 @@ export class LiveSessionController {
   #failure: Error | undefined;
   #muted = false;
   #awaitingUserSpeech = true;
+  #playbackRequested = false;
+  #openingResponseActive = false;
   #phase: LivePhase = "connecting";
   #inputLevel = 0;
   #levelsReceived = false;
@@ -262,6 +264,8 @@ export class LiveSessionController {
     );
     this.#instructionsSent = instructions.length;
     this.#awaitingUserSpeech = true;
+    this.#playbackRequested = false;
+    this.#openingResponseActive = false;
     this.#levelsReceived = false;
     this.#lastInputSpeechAt = Number.NEGATIVE_INFINITY;
     const session = ++this.#sessionNumber;
@@ -409,8 +413,7 @@ export class LiveSessionController {
   /** The result of work the session did not hear started, as context the voice says unprompted. */
   #sayResult(context: string): void {
     // A requested result must be heard even when no one spoke after reconnecting.
-    this.#awaitingUserSpeech = false;
-    this.#transport?.setPlaybackMuted?.(false);
+    this.#requestPlayback();
     for (const chunk of chunkLiveContext(context)) {
       this.#queueSend(buildSessionContextAppend(chunk, "speakable"));
     }
@@ -486,13 +489,18 @@ export class LiveSessionController {
         this.#addTranscript("user", event.item.text);
         break;
       case "output_transcript.added":
-        if (this.#awaitingUserSpeech) break;
+        if (!this.#acceptAssistantOutput()) break;
         this.#touch();
         this.#addTranscript("assistant", event.item.text);
         break;
       case "turn.done":
         if (event.turn.role === "user") this.#hearUser(event.turn.transcript);
-        else if (this.#awaitingUserSpeech) break;
+        else if (this.#awaitingUserSpeech) {
+          // No cancel command is available: discard the entire opening response.
+          // Playback stays muted until output from the following response arrives.
+          this.#openingResponseActive = false;
+          break;
+        }
         this.#touch();
         this.#finishTranscript(event.turn.role, event.turn.transcript);
         break;
@@ -507,7 +515,7 @@ export class LiveSessionController {
         this.#touch();
         break;
       case "output_audio.delta":
-        if (this.#awaitingUserSpeech) break;
+        if (!this.#acceptAssistantOutput()) break;
         this.#touch();
         break;
       case "unknown":
@@ -520,9 +528,21 @@ export class LiveSessionController {
     // Missing telemetry keeps the transcript-only fallback; measured silence does not.
     if (this.#levelsReceived && Date.now() - this.#lastInputSpeechAt > INPUT_SPEECH_WINDOW_MS)
       return;
-    if (!this.#awaitingUserSpeech) return;
+    this.#requestPlayback();
+  }
+
+  #requestPlayback(): void {
+    this.#playbackRequested = true;
+    if (!this.#awaitingUserSpeech || this.#openingResponseActive) return;
     this.#awaitingUserSpeech = false;
     this.#transport?.setPlaybackMuted?.(false);
+  }
+
+  #acceptAssistantOutput(): boolean {
+    if (this.#playbackRequested) this.#requestPlayback();
+    if (!this.#awaitingUserSpeech) return true;
+    this.#openingResponseActive = true;
+    return false;
   }
 
   #echoInstructions(echoed: string | undefined): void {
@@ -556,7 +576,11 @@ export class LiveSessionController {
   #handleLevels(input: number, output: number): void {
     this.#levelsReceived = true;
     if (!this.#muted && input > INPUT_ACTIVE_LEVEL) this.#lastInputSpeechAt = Date.now();
-    if (this.#awaitingUserSpeech) output = 0;
+    if (this.#awaitingUserSpeech) {
+      if (!this.#playbackRequested && output > OUTPUT_ACTIVE_LEVEL)
+        this.#openingResponseActive = true;
+      output = 0;
+    }
     const outputChanged = output !== this.#outputLevel;
     this.#inputLevel = input;
     this.#outputLevel = output;
