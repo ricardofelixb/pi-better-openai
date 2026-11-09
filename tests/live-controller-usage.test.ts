@@ -320,6 +320,7 @@ describe("parking", () => {
     await controller.start();
     sessions[0]!.emit(DELEGATION);
     await seconds(15);
+    sessions[0]!.emit({ type: "input_transcript.added", item: { text: "Any news?" } });
     sessions[0]!.emit({
       type: "output_transcript.added",
       item: { text: "Looking into it" },
