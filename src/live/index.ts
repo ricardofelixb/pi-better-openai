@@ -236,10 +236,6 @@ export function registerOpenAILive(
   let settling: Promise<void> | undefined;
   let choosing = false;
   let bridging = false;
-  // a call that is loading what it needs before its panel opens; it has no run to stop yet
-  let starting = false;
-  // bumped at shutdown, so a call still loading then opens nothing
-  let epoch = 0;
   let bridge: LiveBridgeServer | undefined;
   let bridgeCtx: ExtensionContext | undefined;
   let attaching = false;
@@ -296,7 +292,7 @@ export function registerOpenAILive(
     }
 
     // another start may have got in while the question was open or the last call settled
-    if (activeRun || starting || bridging) return;
+    if (activeRun || bridging) return;
     await runUi(ctx, cfg, target);
   }
 
@@ -314,20 +310,32 @@ export function registerOpenAILive(
     const billedSeconds = () => [...billed.values()].reduce((sum, seconds) => sum + seconds, 0);
     // read now, so that the end of the call can say how far the window moved
     const usedBefore = readFiveHourUsed(ctx);
+    // While the factory loads there is no panel yet, but the call already holds the run slot: a
+    // second start, a phone call or a stop (a second /live, shutdown) finds it, and a stop cancels
+    // the call before it opens anything.
+    let cancelled = false;
+    const loading: ActiveLiveRun = {
+      getSession: () => undefined,
+      finishUi: () => {
+        cancelled = true;
+      },
+      dispose: async () => undefined,
+    };
+    activeRun = loading;
+    const release = () => {
+      if (activeRun === loading) activeRun = undefined;
+    };
     let createLiveSession: LiveSessionFactory;
-    const startedIn = epoch;
-    starting = true;
     try {
       createLiveSession = await loadSessionFactory();
     } catch (cause) {
+      release();
       const error = errorFrom(cause);
       ctx.ui.notify(sanitizeDiagnosticError(error.message), "error");
-      starting = false;
       return { error, billedSeconds: 0 };
     }
-    // the session was shut down while this loaded
-    if (epoch !== startedIn) {
-      starting = false;
+    if (cancelled) {
+      release();
       return { billedSeconds: 0 };
     }
 
@@ -478,7 +486,8 @@ export function registerOpenAILive(
         dispose,
       };
       activeRun = run;
-      starting = false;
+      // stopped between the load and the panel
+      if (cancelled) finishUi({});
 
       if (bridged) {
         // The phone is the only microphone in play, so there is no floor to queue for.
@@ -549,9 +558,7 @@ export function registerOpenAILive(
         });
 
       return visualizer;
-    }).finally(() => {
-      starting = false;
-    });
+    }).finally(release);
 
     const run = activeRun;
     if (run) {
@@ -580,8 +587,7 @@ export function registerOpenAILive(
     return { ...result, billedSeconds: connected };
   }
 
-  const isBusy = () =>
-    activeRun !== undefined || settling !== undefined || choosing || bridging || starting;
+  const isBusy = () => activeRun !== undefined || settling !== undefined || choosing || bridging;
 
   async function startBridged(
     ctx: ExtensionContext,
@@ -742,7 +748,6 @@ export function registerOpenAILive(
   });
 
   pi.on("session_shutdown", async () => {
-    epoch += 1;
     await stopActive();
     activeRun = undefined;
     // A phone on the line hears the call end before the socket goes.
@@ -756,7 +761,7 @@ export function registerOpenAILive(
   publishPhoneEndpoint();
 
   return {
-    isActive: () => activeRun !== undefined || settling !== undefined || starting,
+    isActive: () => activeRun !== undefined || settling !== undefined,
     stop: stopActive,
     attachBridge,
   };
