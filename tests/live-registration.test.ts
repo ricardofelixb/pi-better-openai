@@ -479,6 +479,46 @@ describe("registerOpenAILive", () => {
     expect(notifyUnfocused).not.toHaveBeenCalled();
   });
 
+  test("a second /live while the first is still starting opens nothing more", async () => {
+    const harness = createRegistrationHarness();
+    const sessions: Array<ReturnType<typeof makeSessionStub>> = [];
+    const arbiter = makeFakeArbiter();
+    const live = registerOpenAILive(
+      harness.pi,
+      () => makeResolvedConfig({ live: { enabled: true, voice: "vale", audioHost: "" } }),
+      {
+        createSession: (options) => {
+          const stub = makeSessionStub(options);
+          sessions.push(stub);
+          return stub;
+        },
+        createArbiter: arbiter.createArbiter,
+        probeFocusReporting: vi.fn(async () => true),
+        attachFocusReporting: vi.fn(() => vi.fn()),
+        notifyActivatedUnfocused: vi.fn(),
+        tickMs: 60_000,
+      },
+    );
+    const captured: CapturedCustom = { component: undefined, tui: makeFakeTui() };
+    const custom = makeCustomMock(captured);
+    const ctx = makeContext(custom);
+
+    // no await between the two: the first has not yet loaded what it needs to open its panel
+    const first = commandFrom(harness).handler("", ctx);
+    const second = commandFrom(harness).handler("", ctx);
+    expect(live.isActive()).toBe(true);
+    await second;
+    await vi.waitFor(() => {
+      requireCallbacks(arbiter);
+    });
+    requireCallbacks(arbiter).onActivated("focus");
+    await first;
+
+    expect(custom).toHaveBeenCalledOnce();
+    expect(sessions).toHaveLength(1);
+    expect(live.isActive()).toBe(false);
+  });
+
   test("hands the chosen audio host to the session, so it is reached over ssh", async () => {
     const harness = createRegistrationHarness();
     const sessions: Array<ReturnType<typeof makeSessionStub>> = [];
