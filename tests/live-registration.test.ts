@@ -479,7 +479,7 @@ describe("registerOpenAILive", () => {
     expect(notifyUnfocused).not.toHaveBeenCalled();
   });
 
-  test("a second /live while the first is still starting opens nothing more", async () => {
+  test("a second /live while the first is still starting cancels it: no panel, no session", async () => {
     const harness = createRegistrationHarness();
     const sessions: Array<ReturnType<typeof makeSessionStub>> = [];
     const arbiter = makeFakeArbiter();
@@ -505,18 +505,23 @@ describe("registerOpenAILive", () => {
 
     // no await between the two: the first has not yet loaded what it needs to open its panel
     const first = commandFrom(harness).handler("", ctx);
-    const second = commandFrom(harness).handler("", ctx);
     expect(live.isActive()).toBe(true);
-    await second;
+    const second = commandFrom(harness).handler("", ctx);
+    await Promise.all([first, second]);
+
+    expect(custom).not.toHaveBeenCalled();
+    expect(sessions).toHaveLength(0);
+    expect(live.isActive()).toBe(false);
+
+    // and the call after that starts normally
+    const third = commandFrom(harness).handler("", ctx);
     await vi.waitFor(() => {
       requireCallbacks(arbiter);
     });
     requireCallbacks(arbiter).onActivated("focus");
-    await first;
-
+    await third;
     expect(custom).toHaveBeenCalledOnce();
     expect(sessions).toHaveLength(1);
-    expect(live.isActive()).toBe(false);
   });
 
   test("hands the chosen audio host to the session, so it is reached over ssh", async () => {
