@@ -25,11 +25,10 @@ import {
   LIVE_TRANSCRIPT_MESSAGE_TYPE,
   recentChat,
 } from "./context.ts";
-import {
-  LiveSessionController,
-  type LiveSessionControllerOptions,
-  type LiveTranscript,
-} from "./controller.ts";
+// The session controller pulls the realtime transport (ws, undici, proxy
+// agents) and WebRTC glue. It is only needed once `/live` actually starts, so
+// it loads on first start instead of at extension registration.
+import type { LiveSessionControllerOptions, LiveTranscript } from "./controller.ts";
 import { attachFocusReporting, probeFocusReporting, type FocusTerminalHandle } from "./focus.ts";
 import { createLivePhoneEndpoint, LIVE_PHONE_EVENT } from "./phone/endpoint.ts";
 import { fiveHourUsedPercent, formatCallReadout } from "./readout.ts";
@@ -210,8 +209,13 @@ export function registerOpenAILive(
   stop(): Promise<void>;
   attachBridge(ctx: ExtensionContext): Promise<void>;
 } {
-  const createSession =
-    dependencies.createSession ?? ((options) => new LiveSessionController(options));
+  let createSession: LiveSessionFactory | undefined = dependencies.createSession;
+  const loadSessionFactory = async (): Promise<LiveSessionFactory> => {
+    if (createSession) return createSession;
+    const { LiveSessionController } = await import("./controller.ts");
+    createSession = (options) => new LiveSessionController(options);
+    return createSession;
+  };
   const createArbiter: LiveArbiterFactory =
     dependencies.createArbiter ??
     ((options, callbacks) => new LiveFloorArbiter(options, callbacks));
@@ -304,6 +308,15 @@ export function registerOpenAILive(
     const billedSeconds = () => [...billed.values()].reduce((sum, seconds) => sum + seconds, 0);
     // read now, so that the end of the call can say how far the window moved
     const usedBefore = readFiveHourUsed(ctx);
+    let createLiveSession: LiveSessionFactory;
+    try {
+      createLiveSession = await loadSessionFactory();
+    } catch (cause) {
+      const error = errorFrom(cause);
+      ctx.ui.notify(sanitizeDiagnosticError(error.message), "error");
+      return { error, billedSeconds: 0 };
+    }
+
     const result = await showLiveUi(ctx, bridged !== undefined, (tui, theme, done) => {
       let completed = false;
       let disposed = false;
@@ -352,7 +365,7 @@ export function registerOpenAILive(
         sessionParked = false;
         generation += 1;
         const said = generation;
-        const created = createSession({
+        const created = createLiveSession({
           sessionId: ctx.sessionManager.getSessionId(),
           // asked again for each session the call opens, so one after a park hears the meanwhile
           chat: () => recentChat(ctx.sessionManager.getBranch()),
