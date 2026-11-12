@@ -447,6 +447,13 @@ describe("registerOpenAILive", () => {
     const captured: CapturedCustom = { component: undefined, tui: makeFakeTui() };
     const custom = makeCustomMock(captured);
     const ctx = makeContext(custom);
+    ctx.model = { provider: "openai", id: "gpt-6.1-sol" } as ExtensionContext["model"];
+    const getApiKeyForProvider = vi.fn(async (provider: string) =>
+      provider === "openai-codex"
+        ? JSON.stringify({ access: "voice-codex-access", accountId: "acct_voice" })
+        : "direct-openai-access",
+    );
+    ctx.modelRegistry.getApiKeyForProvider = getApiKeyForProvider;
 
     const run = commandFrom(harness).handler("", ctx);
     await vi.waitFor(() => {
@@ -460,11 +467,61 @@ describe("registerOpenAILive", () => {
     expect(sessions[0]!.options.voice).toBe("vale");
     expect(sessions[0]!.options.sessionId).toBe("session-7");
     expect(sessions[0]!.options.resolveMedia).toBeTypeOf("function");
+    await expect(sessions[0]!.options.getCredentials()).resolves.toMatchObject({
+      accessToken: "voice-codex-access",
+      accountId: "acct_voice",
+    });
+    expect(getApiKeyForProvider).toHaveBeenCalledExactlyOnceWith("openai-codex");
     expect(sessions[0]!.start).toHaveBeenCalledOnce();
     expect(sessions[0]!.stop).toHaveBeenCalledOnce();
     expect(arbiter.arbiter.leave).toHaveBeenCalledOnce();
     expect(disposeFocus).toHaveBeenCalledOnce();
     expect(notifyUnfocused).not.toHaveBeenCalled();
+  });
+
+  test("a second /live while the first is still starting cancels it: no panel, no session", async () => {
+    const harness = createRegistrationHarness();
+    const sessions: Array<ReturnType<typeof makeSessionStub>> = [];
+    const arbiter = makeFakeArbiter();
+    const live = registerOpenAILive(
+      harness.pi,
+      () => makeResolvedConfig({ live: { enabled: true, voice: "vale", audioHost: "" } }),
+      {
+        createSession: (options) => {
+          const stub = makeSessionStub(options);
+          sessions.push(stub);
+          return stub;
+        },
+        createArbiter: arbiter.createArbiter,
+        probeFocusReporting: vi.fn(async () => true),
+        attachFocusReporting: vi.fn(() => vi.fn()),
+        notifyActivatedUnfocused: vi.fn(),
+        tickMs: 60_000,
+      },
+    );
+    const captured: CapturedCustom = { component: undefined, tui: makeFakeTui() };
+    const custom = makeCustomMock(captured);
+    const ctx = makeContext(custom);
+
+    // no await between the two: the first has not yet loaded what it needs to open its panel
+    const first = commandFrom(harness).handler("", ctx);
+    expect(live.isActive()).toBe(true);
+    const second = commandFrom(harness).handler("", ctx);
+    await Promise.all([first, second]);
+
+    expect(custom).not.toHaveBeenCalled();
+    expect(sessions).toHaveLength(0);
+    expect(live.isActive()).toBe(false);
+
+    // and the call after that starts normally
+    const third = commandFrom(harness).handler("", ctx);
+    await vi.waitFor(() => {
+      requireCallbacks(arbiter);
+    });
+    requireCallbacks(arbiter).onActivated("focus");
+    await third;
+    expect(custom).toHaveBeenCalledOnce();
+    expect(sessions).toHaveLength(1);
   });
 
   test("hands the chosen audio host to the session, so it is reached over ssh", async () => {

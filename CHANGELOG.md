@@ -11,6 +11,24 @@
 - Cut what a Live call draws on the Codex plan, which is billed by the second the call is connected whatever is said (measured with `scripts/live-usage-bench.ts`: about half a point of a Plus plan's 5-hour window per minute). A call hangs up on its own after `live.idleHangupSeconds` (default 120, `0` off) with no speech and no task running. While a delegated task runs for `live.parkAfterSeconds` (default 20, `0` off) with nobody speaking, the voice session is closed and the call is parked, then a fresh session says the result when the task finishes; press `r` in the panel to resume sooner. The panel shows the connected time, and the end of a call reports it with how far the 5-hour window moved. This holds on this computer, over SSH, and for phones.
 - Add optional, feature-gated frames to the phone protocol: `hello.features` (up to 8 names of up to 32 characters; `"park"` and `"usage"` are known), then `park`, `phase: "parked"` and phone `resume` for a phone that parks, and `usage {seconds}` for a phone that wants the billed seconds. A phone that names neither sees no new frame and keeps working; it is never parked.
 
+## 0.3.7
+
+- Load the image runtime, `sharp` and the live voice transport at first use instead of at extension load. Registration, commands and rendering are unchanged; fresh-process import time drops from about 87 ms to 61 ms.
+- A missing or broken `sharp` no longer prevents the extension from loading; only format conversion, input-image validation and pets report the failure.
+
+## 0.3.6
+
+- Add the official `gpt-6-cyber` model as a native OpenAI Responses fallback, preserving host authentication, transports, classifiers, and authoritative catalog metadata.
+- Document Daybreak Red approval requirements and keep the existing Daybreak aliases, Codex fallbacks, and Fast/Ultrafast eligibility unchanged.
+- Cover Cyber metadata, catalog precedence, authentication preservation, and unsupported service tiers with regression tests.
+- Live Cyber access remains unverified: the tested ChatGPT subscription route was unsupported, and the tested API project returned `model_not_found`. Release the catalog integration without claiming account entitlement.
+
+## 0.3.5
+
+- Default Codex subscription image generation to `gpt-image-2.6`, verified with a live generation. Keep `gpt-image-2.5` and `gpt-image-2` selectable and preserve explicit model settings.
+- Verify dual-login workflows: keep an `openai/*` chat model selected while images, web search, live voice, usage, and banked resets resolve the independent `openai-codex` account.
+- Expand regression coverage for Codex usage and banked-reset counts in the below-editor widget, confirmed and automatic reset redemption, and pooled Codex account selection without substituting OpenAI credentials.
+
 ## 0.3.3
 
 - Add GPT-6.1 Terra to native OpenAI and legacy Codex model catalogs while preserving host authentication, transports, classifiers, and authoritative metadata. Use the documented 1.05M context for OpenAI and a conservative 272K context for Codex.
