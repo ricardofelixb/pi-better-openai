@@ -8,11 +8,9 @@ import {
   visibleWidth,
 } from "@earendil-works/pi-tui";
 import type { LivePhase, LiveTranscript } from "./controller.ts";
-import { formatConnectedTime } from "./readout.ts";
 
 const ANIMATION_INTERVAL_MS = 80;
 const LIVE_TOGGLE_KEY = Key.ctrlShift("l");
-const RESUME_KEY = "r";
 const ANSI_ESCAPE_REGEXP = new RegExp(String.raw`\u001B\[[0-?]*[ -/]*[@-~]`, "g");
 
 export interface LiveVisualizerOptions {
@@ -20,18 +18,11 @@ export interface LiveVisualizerOptions {
   requestRender(): void;
   onStop(): void;
   onToggleMute(): void;
-  /** Brings a parked call back before its work is done. */
-  onResume?(): void;
-  /** Where the audio device is, when it is not this computer (for example a phone). */
-  source?: string;
-  /** False when the keyboard stays with the editor, so the label offers no keys. */
-  keys?: boolean;
 }
 
 type RenderCache = {
   width: number;
   phase: LivePhase;
-  connectedSeconds: number;
   displayLevel: number;
   frame: number;
   transcriptRole: LiveTranscript["role"] | undefined;
@@ -39,7 +30,7 @@ type RenderCache = {
   lines: string[];
 };
 
-export function sanitizeTranscript(text: string): string {
+function sanitizeTranscript(text: string): string {
   const withoutAnsi = text.replace(ANSI_ESCAPE_REGEXP, "");
   let safe = "";
   for (const character of withoutAnsi) {
@@ -63,7 +54,6 @@ export class LiveVisualizer implements Component {
   #phase: LivePhase = "connecting";
   #inputLevel = 0;
   #displayLevel = 0;
-  #connectedSeconds = 0;
   #frame = 0;
   #transcriptRole: LiveTranscript["role"] | undefined;
   #transcriptText = "";
@@ -84,13 +74,6 @@ export class LiveVisualizer implements Component {
   setPhase(phase: LivePhase): void {
     if (this.#phase === phase) return;
     this.#phase = phase;
-    this.#changed();
-  }
-
-  /** How long the call has been connected, which is what a plan is billed. */
-  setConnectedSeconds(seconds: number): void {
-    if (this.#connectedSeconds === seconds) return;
-    this.#connectedSeconds = seconds;
     this.#changed();
   }
 
@@ -120,8 +103,6 @@ export class LiveVisualizer implements Component {
       this.#options.onStop();
     } else if (matchesKey(data, Key.space)) {
       this.#options.onToggleMute();
-    } else if (matchesKey(data, RESUME_KEY) && this.#phase === "parked") {
-      this.#options.onResume?.();
     }
   }
 
@@ -142,7 +123,6 @@ export class LiveVisualizer implements Component {
       this.#cache &&
       this.#cache.width === width &&
       this.#cache.phase === this.#phase &&
-      this.#cache.connectedSeconds === this.#connectedSeconds &&
       this.#cache.displayLevel === this.#displayLevel &&
       this.#cache.frame === this.#frame &&
       this.#cache.transcriptRole === this.#transcriptRole &&
@@ -155,7 +135,6 @@ export class LiveVisualizer implements Component {
     this.#cache = {
       width,
       phase: this.#phase,
-      connectedSeconds: this.#connectedSeconds,
       displayLevel: this.#displayLevel,
       frame: this.#frame,
       transcriptRole: this.#transcriptRole,
@@ -175,7 +154,7 @@ export class LiveVisualizer implements Component {
       const color =
         this.#phase === "error"
           ? "error"
-          : this.#phase === "muted" || this.#phase === "standby" || this.#phase === "parked"
+          : this.#phase === "muted" || this.#phase === "standby"
             ? "dim"
             : "success";
       return [
@@ -193,10 +172,7 @@ export class LiveVisualizer implements Component {
       theme.fg("border", "│") + content + theme.fg("border", "│");
     const top = theme.fg("border", `┌${"─".repeat(innerWidth)}┐`);
     const spectrumColor: ThemeColor =
-      this.#phase === "muted" ||
-      this.#phase === "connecting" ||
-      this.#phase === "standby" ||
-      this.#phase === "parked"
+      this.#phase === "muted" || this.#phase === "connecting" || this.#phase === "standby"
         ? "dim"
         : this.#phase === "error"
           ? "error"
@@ -242,7 +218,6 @@ export class LiveVisualizer implements Component {
       working: "○",
       speaking: "»",
       muted: "×",
-      parked: "‖",
       error: "!",
     };
     const icon =
@@ -256,20 +231,10 @@ export class LiveVisualizer implements Component {
       working: "warning",
       speaking: "accent",
       muted: "dim",
-      parked: "dim",
       error: "error",
     };
     const status = `${icon} ${this.#phase}`;
-    const source = this.#options.source ? ` · ${this.#options.source}` : "";
-    const connected =
-      this.#connectedSeconds > 0 ? ` · ${formatConnectedTime(this.#connectedSeconds)}` : "";
-    const keys =
-      this.#options.keys === false
-        ? ""
-        : this.#phase === "parked"
-          ? " · r resume · esc end"
-          : " · space mute · esc end";
-    const fullLabel = ` ${status}${source}${connected}${keys} `;
+    const fullLabel = ` ${status} · space mute · esc end `;
     const shortLabel = ` ${status} `;
     const label =
       innerWidth >= visibleWidth(fullLabel) + 1
@@ -294,7 +259,7 @@ export class LiveVisualizer implements Component {
     const connectingEnergy =
       this.#phase === "connecting" ? 0.06 + 0.03 * Math.sin(this.#frame * 0.35) : 0;
     const energy =
-      this.#phase === "muted" || this.#phase === "standby" || this.#phase === "parked"
+      this.#phase === "muted" || this.#phase === "standby"
         ? 0
         : Math.max(microphoneEnergy, connectingEnergy);
     const maxHeight = rows * (blocks.length - 1);

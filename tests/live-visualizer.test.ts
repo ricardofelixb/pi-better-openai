@@ -60,67 +60,6 @@ describe("LiveVisualizer", () => {
     }
   });
 
-  test("names the device in the footer when it is not this computer", () => {
-    const visualizer = new LiveVisualizer({
-      theme,
-      requestRender: vi.fn(),
-      onStop: vi.fn(),
-      onToggleMute: vi.fn(),
-      source: "phone",
-    });
-    try {
-      visualizer.setPhase("listening");
-      expect(visualizer.render(60).join("\n")).toContain(
-        "● listening · phone · space mute · esc end",
-      );
-      expect(visualizer.render(26).join("\n")).toContain("● listening ");
-    } finally {
-      visualizer.dispose();
-    }
-  });
-
-  test("shows how long the call has been connected", () => {
-    const visualizer = new LiveVisualizer({
-      theme,
-      requestRender: vi.fn(),
-      onStop: vi.fn(),
-      onToggleMute: vi.fn(),
-    });
-    try {
-      visualizer.setPhase("listening");
-      expect(visualizer.render(70).join("\n")).not.toContain("connected");
-      visualizer.setConnectedSeconds(192);
-      expect(visualizer.render(70).join("\n")).toContain("● listening · 3m 12s · space mute");
-      visualizer.setConnectedSeconds(207);
-      expect(visualizer.render(70).join("\n")).toContain("● listening · 3m 27s · space mute");
-    } finally {
-      visualizer.dispose();
-    }
-  });
-
-  test("offers resume, not mute, while the call is parked", () => {
-    const onResume = vi.fn();
-    const onToggleMute = vi.fn();
-    const visualizer = new LiveVisualizer({
-      theme,
-      requestRender: vi.fn(),
-      onStop: vi.fn(),
-      onToggleMute,
-      onResume,
-    });
-    try {
-      visualizer.handleInput("r");
-      expect(onResume).not.toHaveBeenCalled();
-
-      visualizer.setPhase("parked");
-      expect(visualizer.render(60).join("\n")).toContain("parked · r resume · esc end");
-      visualizer.handleInput("r");
-      expect(onResume).toHaveBeenCalledOnce();
-    } finally {
-      visualizer.dispose();
-    }
-  });
-
   test("animates through requestRender and stops its timer on dispose", () => {
     vi.useFakeTimers();
     const requestRender = vi.fn();

@@ -1,40 +1,13 @@
-import {
-  type ExtensionAPI,
-  type ExtensionContext,
-  keyHint,
-  type Theme,
-} from "@earendil-works/pi-coding-agent";
-import { type Component, Text, type TUI } from "@earendil-works/pi-tui";
-import { fileURLToPath } from "node:url";
+import { type ExtensionAPI, type ExtensionContext } from "@earendil-works/pi-coding-agent";
+import { Text } from "@earendil-works/pi-tui";
 import { getCodexCredentials } from "../codex-auth.ts";
 import type { ResolvedConfig } from "../config.ts";
 import { sanitizeDiagnosticError } from "../format.ts";
-import { piAgentDir } from "../paths.ts";
-import { requestCodexUsage } from "../usage.ts";
-import { createBridgeMediaFactory } from "./bridge/media.ts";
-import type { BridgeControlFrame } from "./bridge/protocol.ts";
-import {
-  acceptBridgeConnection,
-  connectedPair,
-  type LiveBridgeConnection,
-  LiveBridgeServer,
-} from "./bridge/socket.ts";
-import {
-  LIVE_DELEGATION_MESSAGE_TYPE,
-  LIVE_TRANSCRIPT_HEADING,
-  LIVE_TRANSCRIPT_MESSAGE_TYPE,
-  recentChat,
-} from "./context.ts";
 // The session controller pulls the realtime transport (ws, undici, proxy
 // agents) and WebRTC glue. It is only needed once `/live` actually starts, so
 // it loads on first start instead of at extension registration.
 import type { LiveSessionControllerOptions, LiveTranscript } from "./controller.ts";
 import { attachFocusReporting, probeFocusReporting, type FocusTerminalHandle } from "./focus.ts";
-import { createLivePhoneEndpoint, LIVE_PHONE_EVENT } from "./phone/endpoint.ts";
-import { fiveHourUsedPercent, formatCallReadout } from "./readout.ts";
-import { type LauncherOptions, registerPersonalLauncher } from "./remote/host.ts";
-import { type MediaTarget, OriginCancelled } from "./remote/origin.ts";
-import { type RouteDependencies, resolveLiveMedia, resolveLiveTarget } from "./remote/route.ts";
 import {
   LIVE_QUEUE_TICK_MS,
   LiveFloorArbiter,
@@ -44,21 +17,15 @@ import {
   type LiveFloorArbiterOptions,
 } from "./queue.ts";
 import { LiveVisualizer, LIVE_VISUALIZER_TOGGLE_KEY } from "./visualizer.ts";
-import type { LiveVoice } from "./voices.ts";
 
 export const LIVE_COMMAND = "live";
-export { LIVE_DELEGATION_MESSAGE_TYPE };
+export const LIVE_DELEGATION_MESSAGE_TYPE = "better-openai-live-delegation";
 export const LIVE_FOCUS_SETTLE_MS = 400;
-const LIVE_WIDGET_KEY = "better-openai-live";
-/** How long the plan's meter gets to answer before the call's readout goes without it. */
-const USAGE_READ_MS = 10_000;
 
 interface LiveSessionRuntime {
   start(): Promise<void>;
   stop(): Promise<void>;
   toggleMute(): void;
-  /** Brings a parked call back before its work is done. */
-  resume(): void;
   handleAgentMessage(message: unknown): void;
   handleAgentSettled(): void;
 }
@@ -76,41 +43,6 @@ interface ActiveLiveRun {
 
 type LiveUiResult = { error?: Error };
 
-/** How a call went: what ended it and the seconds it was connected, which is what is billed. */
-type LiveCallResult = LiveUiResult & { billedSeconds: number };
-
-type LiveUiFactory = (
-  tui: TUI,
-  theme: Theme,
-  done: (result: LiveUiResult) => void,
-) => Component & { dispose?(): void };
-
-// A call from Ovis shows above the editor and leaves it the keyboard, so what is typed on the
-// phone reaches the chat; the phone has its own mute and end. Any other call takes the keyboard.
-function showLiveUi(
-  ctx: ExtensionContext,
-  aboveEditor: boolean,
-  factory: LiveUiFactory,
-): Promise<LiveUiResult> {
-  if (!aboveEditor) {
-    return ctx.ui.custom<LiveUiResult>((tui, theme, _keybindings, done) =>
-      factory(tui, theme, done),
-    );
-  }
-  return new Promise((resolve) => {
-    let finished = false;
-    ctx.ui.setWidget(LIVE_WIDGET_KEY, (tui, theme) =>
-      factory(tui, theme, (result) => {
-        if (finished) return;
-        finished = true;
-        // after the factory has returned, so a call that ends at once still takes its widget away
-        setImmediate(() => ctx.ui.setWidget(LIVE_WIDGET_KEY, undefined));
-        resolve(result);
-      }),
-    );
-  });
-}
-
 type LiveSessionFactory = (options: LiveSessionControllerOptions) => LiveSessionRuntime;
 
 type LiveArbiterFactory = (
@@ -125,23 +57,7 @@ export interface LiveRegistrationDependencies {
   attachFocusReporting?: typeof attachFocusReporting;
   notifyActivatedUnfocused?: (handle: FocusTerminalHandle, label: string) => void;
   tickMs?: number;
-  registerLauncher?: (options: Pick<LauncherOptions, "entry">) => unknown;
-  resolveTarget?: RouteDependencies["resolveTarget"];
-  /** Where the bridge socket goes; defaults to Pi's agent directory. */
-  bridgeAgentDir?: string;
-  /** The environment that says whether Pi runs in a Herdr pane or hc terminal; defaults to this process's. */
-  env?: NodeJS.ProcessEnv;
 }
-
-// The phone behind a bridge connection, when a run's audio device is one. `takeControl` hands the
-// run the connection's stop and mute frames, including any that arrived while it was starting.
-interface BridgedCall {
-  connection: LiveBridgeConnection;
-  takeControl(handler: (frame: BridgeControlFrame) => void): void;
-}
-
-const ALREADY_ON = "Live voice is already on in this Pi.";
-const DISABLED = "Live voice is disabled. Enable it in /openai-settings.";
 
 // eslint-disable-next-line no-control-regex -- OSC payloads must not carry raw control characters; matching them is the point
 const CONTROL_CHARACTER_PATTERN = /[\u0000-\u001F\u007F-\u009F]/g;
@@ -179,36 +95,11 @@ function errorFrom(cause: unknown): Error {
   return cause instanceof Error ? cause : new Error(String(cause));
 }
 
-/** How much of the plan's five-hour window is used; null when the meter cannot be read. */
-function readFiveHourUsed(ctx: ExtensionContext): Promise<number | null> {
-  return requestCodexUsage(ctx, AbortSignal.timeout(USAGE_READ_MS))
-    .then(fiveHourUsedPercent)
-    .catch(() => null);
-}
-
-/** Tells the user what the call cost: the time it was connected and how far the window moved. */
-async function announceCall(
-  ctx: ExtensionContext,
-  seconds: number,
-  usedBefore: Promise<number | null>,
-): Promise<void> {
-  const usedAfter = await readFiveHourUsed(ctx);
-  try {
-    ctx.ui.notify(formatCallReadout(seconds, await usedBefore, usedAfter), "info");
-  } catch {
-    // The session the call ran in may be gone by now.
-  }
-}
-
 export function registerOpenAILive(
   pi: ExtensionAPI,
   getConfig: (ctx: ExtensionContext) => ResolvedConfig,
   dependencies: LiveRegistrationDependencies = {},
-): {
-  isActive(): boolean;
-  stop(): Promise<void>;
-  attachBridge(ctx: ExtensionContext): Promise<void>;
-} {
+): { isActive(): boolean; stop(): Promise<void> } {
   let createSession: LiveSessionFactory | undefined = dependencies.createSession;
   const loadSessionFactory = async (): Promise<LiveSessionFactory> => {
     if (createSession) return createSession;
@@ -223,24 +114,8 @@ export function registerOpenAILive(
   const attachFocus = dependencies.attachFocusReporting ?? attachFocusReporting;
   const notifyUnfocused = dependencies.notifyActivatedUnfocused ?? notifyActivatedUnfocused;
   const tickMs = dependencies.tickMs ?? LIVE_QUEUE_TICK_MS;
-  try {
-    // Lets Pi on another computer start this copy's media host over SSH; only the personal
-    // install of the package ever writes it.
-    (dependencies.registerLauncher ?? registerPersonalLauncher)({
-      entry: fileURLToPath(new URL("./remote/media-host.mjs", import.meta.url)),
-    });
-  } catch {
-    // Best effort: a read-only home must not stop /live from registering.
-  }
   let activeRun: ActiveLiveRun | undefined;
   let settling: Promise<void> | undefined;
-  let choosing = false;
-  let bridging = false;
-  let bridge: LiveBridgeServer | undefined;
-  let bridgeCtx: ExtensionContext | undefined;
-  let attaching = false;
-  const bridgedCalls = new Set<Promise<void>>();
-  const env = dependencies.env ?? process.env;
 
   async function stopActive(): Promise<void> {
     const run = activeRun;
@@ -259,87 +134,20 @@ export function registerOpenAILive(
     }
     const cfg = getConfig(ctx);
     if (!cfg.live.enabled) {
-      ctx.ui.notify(DISABLED, "warning");
+      ctx.ui.notify("Live voice is disabled. Enable it in /openai-settings.", "warning");
       return;
     }
     if (settling) await settling;
 
-    // `auto` may have to ask which computer the user is at. That is settled here, when /live is
-    // asked, so a start that later waits for the floor neither asks at an odd moment nor skips
-    // the answer: it reuses this target.
-    let target: MediaTarget | undefined;
-    if (cfg.live.audioHost?.trim() === "auto") {
-      if (choosing) return;
-      choosing = true;
-      try {
-        target = await resolveLiveTarget({
-          audioHost: cfg.live.audioHost,
-          resolveTarget: dependencies.resolveTarget,
-          choose: async (labels, notes) => {
-            for (const note of notes) ctx.ui.notify(`Not offered: ${note}`, "info");
-            return ctx.ui.select("Which computer are you at?", labels);
-          },
-        });
-      } catch (cause) {
-        ctx.ui.notify(
-          sanitizeDiagnosticError(errorFrom(cause).message),
-          cause instanceof OriginCancelled ? "info" : "error",
-        );
-        return;
-      } finally {
-        choosing = false;
-      }
-    }
-
-    // another start may have got in while the question was open or the last call settled
-    if (activeRun || bridging) return;
-    await runUi(ctx, cfg, target);
-  }
-
-  async function runUi(
-    ctx: ExtensionContext,
-    cfg: ResolvedConfig,
-    target: MediaTarget | undefined,
-    bridged?: BridgedCall,
-  ): Promise<LiveCallResult> {
-    // what was said, in order, across every session the call runs: saved to the chat once it ends
-    const spoken = new Map<string, string>();
-    let generation = 0;
-    // the seconds each session of the call was connected: together, what the plan is billed
-    const billed = new Map<number, number>();
-    const billedSeconds = () => [...billed.values()].reduce((sum, seconds) => sum + seconds, 0);
-    // read now, so that the end of the call can say how far the window moved
-    const usedBefore = readFiveHourUsed(ctx);
-    // While the factory loads there is no panel yet, but the call already holds the run slot: a
-    // second start, a phone call or a stop (a second /live, shutdown) finds it, and a stop cancels
-    // the call before it opens anything.
-    let cancelled = false;
-    const loading: ActiveLiveRun = {
-      getSession: () => undefined,
-      finishUi: () => {
-        cancelled = true;
-      },
-      dispose: async () => undefined,
-    };
-    activeRun = loading;
-    const release = () => {
-      if (activeRun === loading) activeRun = undefined;
-    };
     let createLiveSession: LiveSessionFactory;
     try {
       createLiveSession = await loadSessionFactory();
     } catch (cause) {
-      release();
-      const error = errorFrom(cause);
-      ctx.ui.notify(sanitizeDiagnosticError(error.message), "error");
-      return { error, billedSeconds: 0 };
-    }
-    if (cancelled) {
-      release();
-      return { billedSeconds: 0 };
+      ctx.ui.notify(sanitizeDiagnosticError(errorFrom(cause).message), "error");
+      return;
     }
 
-    const result = await showLiveUi(ctx, bridged !== undefined, (tui, theme, done) => {
+    const result = await ctx.ui.custom<LiveUiResult>((tui, theme, _keybindings, done) => {
       let completed = false;
       let disposed = false;
       let session: LiveSessionRuntime | undefined;
@@ -348,8 +156,6 @@ export function registerOpenAILive(
       let tickInterval: NodeJS.Timeout | undefined;
       let focusDebounce: NodeJS.Timeout | undefined;
       let disposeFocus: (() => void) | undefined;
-      // what the call's mute is: no phase says so while it is parked
-      let muted = false;
 
       const finishUi = (value: LiveUiResult) => {
         if (completed) return;
@@ -362,11 +168,8 @@ export function registerOpenAILive(
         requestRender: () => tui.requestRender(),
         onStop: () => finishUi({}),
         onToggleMute: () => session?.toggleMute(),
-        onResume: () => session?.resume(),
-        ...(bridged ? { source: "phone", keys: false } : {}),
       });
-      visualizer.setPhase(bridged ? "connecting" : "standby");
-      const bridgedMedia = bridged ? createBridgeMediaFactory(bridged.connection) : undefined;
+      visualizer.setPhase("standby");
 
       const terminalHandle: FocusTerminalHandle = {
         write: (data) => tui.terminal.write(data),
@@ -385,25 +188,10 @@ export function registerOpenAILive(
       const activateSession = () => {
         if (completed || session) return;
         sessionParked = false;
-        generation += 1;
-        const said = generation;
         const created = createLiveSession({
           sessionId: ctx.sessionManager.getSessionId(),
-          // asked again for each session the call opens, so one after a park hears the meanwhile
-          chat: () => recentChat(ctx.sessionManager.getBranch()),
-          idleHangupSeconds: cfg.live.idleHangupSeconds,
-          parkAfterSeconds: cfg.live.parkAfterSeconds,
-          // a computer's own media closes and opens again; a phone parks only if it said it can
-          ...(bridged ? { canPark: () => bridged.connection.features.has("park") } : {}),
           voice: cfg.live.voice,
           getCredentials: (signal) => getCodexCredentials(ctx, signal),
-          resolveMedia: bridgedMedia
-            ? async () => bridgedMedia
-            : () =>
-                resolveLiveMedia({
-                  audioHost: cfg.live.audioHost,
-                  resolveTarget: target && (async () => target),
-                }),
           delegate: (request) => {
             pi.sendMessage(
               {
@@ -416,43 +204,10 @@ export function registerOpenAILive(
             );
           },
           callbacks: {
-            onPhase: (phase) => {
-              if (phase === "muted") muted = true;
-              else if (phase === "listening" || phase === "speaking" || phase === "working") {
-                muted = false;
-              }
-              visualizer.setPhase(phase);
-              bridged?.connection.send({ type: "phase", phase });
-            },
-            onUsage: (seconds) => {
-              billed.set(said, seconds);
-              const total = billedSeconds();
-              visualizer.setConnectedSeconds(total);
-              if (bridged?.connection.features.has("usage")) {
-                bridged.connection.send({ type: "usage", seconds: total });
-              }
-            },
+            onPhase: (phase) => visualizer.setPhase(phase),
             onLevels: (input) => visualizer.setInputLevel(input),
-            onInstructionsEcho: ({ sent, echoed }) => {
-              if (echoed === sent) return;
-              ctx.ui.notify(
-                `The voice kept ${echoed} of the ${sent} characters of its instructions, so it may not remember the chat.`,
-                "warning",
-              );
-            },
-            onTranscript: (transcript: LiveTranscript | undefined) => {
-              if (transcript) {
-                const speaker = transcript.role === "user" ? "User" : "Assistant";
-                spoken.set(
-                  `${said}:${transcript.role}:${transcript.turn}`,
-                  `${speaker}: ${transcript.text}`,
-                );
-              }
-              visualizer.setTranscript(transcript);
-              bridged?.connection.send(
-                transcript ? { type: "transcript", ...transcript } : { type: "transcript-clear" },
-              );
-            },
+            onTranscript: (transcript: LiveTranscript | undefined) =>
+              visualizer.setTranscript(transcript),
             onTerminal: (error) => {
               if (sessionParked) return;
               finishUi(error ? { error } : {});
@@ -486,79 +241,64 @@ export function registerOpenAILive(
         dispose,
       };
       activeRun = run;
-      // stopped between the load and the panel
-      if (cancelled) finishUi({});
 
-      if (bridged) {
-        // The phone is the only microphone in play, so there is no floor to queue for.
-        bridged.connection.onClose(() => finishUi({}));
-        bridged.takeControl((frame) => {
-          if (frame.type === "stop") finishUi({});
-          else if (frame.type === "resume") session?.resume();
-          else if (frame.type === "set-muted" && session && muted !== frame.muted) {
-            muted = frame.muted;
-            session.toggleMute();
-          }
-        });
-        activateSession();
-      } else
-        setImmediate(() => {
-          void (async () => {
-            try {
-              const focusSupported = await probeFocus(terminalHandle);
-              if (completed) return;
-              const enrolled = createArbiter(
-                {
-                  pid: process.pid,
-                  sessionId: ctx.sessionManager.getSessionId(),
-                  cwd: ctx.cwd,
-                  policy: focusSupported ? "focus" : "fifo",
+      setImmediate(() => {
+        void (async () => {
+          try {
+            const focusSupported = await probeFocus(terminalHandle);
+            if (completed) return;
+            const enrolled = createArbiter(
+              {
+                pid: process.pid,
+                sessionId: ctx.sessionManager.getSessionId(),
+                cwd: ctx.cwd,
+                policy: focusSupported ? "focus" : "fifo",
+              },
+              {
+                onActivated: (cause: LiveActivationCause) => {
+                  if (cause !== "focus") notifyUnfocused(terminalHandle, enrolled.label);
+                  activateSession();
                 },
-                {
-                  onActivated: (cause: LiveActivationCause) => {
-                    if (cause !== "focus") notifyUnfocused(terminalHandle, enrolled.label);
-                    activateSession();
-                  },
-                  onDeactivated: parkSession,
-                },
-              );
-              arbiter = enrolled;
-              enrolled.join();
-              tickInterval = setInterval(() => {
+                onDeactivated: parkSession,
+              },
+            );
+            arbiter = enrolled;
+            enrolled.join();
+            tickInterval = setInterval(() => {
+              try {
+                enrolled.tick();
+              } catch {
+                // A failing tick must not tear down the enrollment.
+              }
+            }, tickMs);
+            tickInterval.unref?.();
+            if (!focusSupported) return;
+            disposeFocus = attachFocus(terminalHandle, (focused) => {
+              if (focusDebounce) clearTimeout(focusDebounce);
+              if (!focused) {
+                enrolled.setFocused(false);
+                return;
+              }
+              // Debounce focus-in so window-manager focus flicker does not flap
+              // floor ownership between two live windows.
+              focusDebounce = setTimeout(() => {
+                focusDebounce = undefined;
                 try {
-                  enrolled.tick();
+                  enrolled.setFocused(true);
                 } catch {
-                  // A failing tick must not tear down the enrollment.
+                  // Focus edges are advisory; a lost race settles next tick.
                 }
-              }, tickMs);
-              tickInterval.unref?.();
-              if (!focusSupported) return;
-              disposeFocus = attachFocus(terminalHandle, (focused) => {
-                if (focusDebounce) clearTimeout(focusDebounce);
-                if (!focused) {
-                  enrolled.setFocused(false);
-                  return;
-                }
-                // Debounce focus-in so window-manager focus flicker does not flap
-                // floor ownership between two live windows.
-                focusDebounce = setTimeout(() => {
-                  focusDebounce = undefined;
-                  try {
-                    enrolled.setFocused(true);
-                  } catch {
-                    // Focus edges are advisory; a lost race settles next tick.
-                  }
-                }, LIVE_FOCUS_SETTLE_MS);
-                focusDebounce.unref?.();
-              });
-            } catch (cause) {
-              finishUi({ error: errorFrom(cause) });
-            }
-          })();
-        });
+              }, LIVE_FOCUS_SETTLE_MS);
+              focusDebounce.unref?.();
+            });
+          } catch (cause) {
+            finishUi({ error: errorFrom(cause) });
+          }
+        })();
+      });
 
       return visualizer;
-    }).finally(release);
+    });
 
     const run = activeRun;
     if (run) {
@@ -568,133 +308,7 @@ export function registerOpenAILive(
       if (activeRun === run) activeRun = undefined;
       if (settling === cleanup) settling = undefined;
     }
-    if (spoken.size > 0) {
-      // into the chat, so the session and the next call know what was said; never starts a turn
-      pi.sendMessage(
-        {
-          customType: LIVE_TRANSCRIPT_MESSAGE_TYPE,
-          content: `${LIVE_TRANSCRIPT_HEADING}\n${[...spoken.values()].join("\n")}`,
-          display: true,
-          details: { source: "live" },
-        },
-        { triggerTurn: false },
-      );
-    }
     if (result.error) ctx.ui.notify(sanitizeDiagnosticError(result.error.message), "error");
-    const connected = billedSeconds();
-    // not awaited: the meter may be slow, and the next call does not wait on a readout
-    if (connected > 0) void announceCall(ctx, connected, usedBefore);
-    return { ...result, billedSeconds: connected };
-  }
-
-  const isBusy = () => activeRun !== undefined || settling !== undefined || choosing || bridging;
-
-  async function startBridged(
-    ctx: ExtensionContext,
-    connection: LiveBridgeConnection,
-    takeControl: BridgedCall["takeControl"],
-    voice: LiveVoice | undefined,
-  ): Promise<void> {
-    let ended: { error?: string } = {};
-    let owned = false;
-    try {
-      const settings = getConfig(ctx);
-      // the phone's choice of voice is for this call alone
-      const cfg = voice ? { ...settings, live: { ...settings.live, voice } } : settings;
-      const refusal =
-        ctx.mode !== "tui"
-          ? "Live voice requires interactive TUI mode."
-          : !cfg.live.enabled
-            ? DISABLED
-            : isBusy()
-              ? ALREADY_ON
-              : undefined;
-      if (refusal) {
-        ended = { error: refusal };
-        return;
-      }
-      bridging = true;
-      owned = true;
-      const result = await runUi(ctx, cfg, undefined, { connection, takeControl });
-      if (result.error) ended = { error: result.error.message };
-      // the final count, which the last server update may not have reached
-      if (connection.features.has("usage")) {
-        connection.send({ type: "usage", seconds: result.billedSeconds });
-      }
-    } catch (cause) {
-      ended = { error: errorFrom(cause).message };
-    } finally {
-      if (owned) bridging = false;
-      connection.send({ type: "ended", ...ended });
-      connection.close();
-    }
-  }
-
-  // The same handling for a phone on the unix socket (Ovis) and one on the phone endpoint.
-  function handleBridgeConnection(connection: LiveBridgeConnection): void {
-    const waiting: BridgeControlFrame[] = [];
-    let handler: ((frame: BridgeControlFrame) => void) | undefined;
-    connection.onControl((frame) => {
-      if (frame.type !== "start") {
-        if (handler) handler(frame);
-        else waiting.push(frame);
-        return;
-      }
-      if (!bridgeCtx) return connection.close();
-      const call = startBridged(
-        bridgeCtx,
-        connection,
-        (next) => {
-          handler = next;
-          for (const queued of waiting.splice(0)) next(queued);
-        },
-        frame.voice,
-      ).catch(() => undefined);
-      bridgedCalls.add(call);
-      void call.finally(() => bridgedCalls.delete(call));
-    });
-  }
-
-  const phoneEndpoint = createLivePhoneEndpoint({
-    status: () => ({
-      available:
-        bridgeCtx !== undefined && bridgeCtx.mode === "tui" && getConfig(bridgeCtx).live.enabled,
-      busy: isBusy(),
-    }),
-    openBridge() {
-      const [relay, local] = connectedPair();
-      acceptBridgeConnection(local, { isBusy, onConnection: handleBridgeConnection });
-      return relay;
-    },
-  });
-
-  // Whoever takes phone calls, such as a gateway, hears the endpoint at load or at the next
-  // session start, whichever comes after it subscribes, like pi-multiprovider's service.
-  function publishPhoneEndpoint(): void {
-    if (typeof pi.events?.emit === "function") pi.events.emit(LIVE_PHONE_EVENT, phoneEndpoint);
-  }
-
-  async function attachBridge(ctx: ExtensionContext): Promise<void> {
-    bridgeCtx = ctx;
-    publishPhoneEndpoint();
-    if (bridge || attaching) return;
-    const pane = env.HERDR_PANE_ID || env.HC_TERMINAL_ID;
-    if (process.platform === "win32" || !pane || ctx.mode !== "tui") return;
-    attaching = true;
-    try {
-      if (!getConfig(ctx).live.enabled) return;
-      const server = new LiveBridgeServer({
-        agentDir: dependencies.bridgeAgentDir ?? piAgentDir(),
-        pane,
-        isBusy,
-        onConnection: handleBridgeConnection,
-      });
-      if (await server.listen()) bridge = server;
-    } catch {
-      // The bridge is an extra; Pi must start without it.
-    } finally {
-      attaching = false;
-    }
   }
 
   async function toggle(ctx: ExtensionContext): Promise<void> {
@@ -708,18 +322,6 @@ export function registerOpenAILive(
   pi.registerMessageRenderer(LIVE_DELEGATION_MESSAGE_TYPE, (message, _options, theme) => {
     const text = messageText(message.content).trim();
     const label = theme.fg("accent", theme.bold("Live request"));
-    return new Text(`${label}\n${theme.fg("customMessageText", text)}`, 1, 0);
-  });
-
-  pi.registerMessageRenderer(LIVE_TRANSCRIPT_MESSAGE_TYPE, (message, options, theme) => {
-    const text = messageText(message.content).replace(LIVE_TRANSCRIPT_HEADING, "").trim();
-    const label = theme.fg("accent", theme.bold("Live call"));
-    // Folded like tool output: the transcript only opens on the expand key.
-    if (!options.expanded) {
-      const lines = text.split("\n").length;
-      const hint = keyHint("app.tools.expand", "to expand");
-      return new Text(`${label} ${theme.fg("dim", `· ${lines} lines`)} ${hint}`, 1, 0);
-    }
     return new Text(`${label}\n${theme.fg("customMessageText", text)}`, 1, 0);
   });
 
@@ -750,19 +352,10 @@ export function registerOpenAILive(
   pi.on("session_shutdown", async () => {
     await stopActive();
     activeRun = undefined;
-    // A phone on the line hears the call end before the socket goes.
-    await Promise.allSettled(bridgedCalls);
-    bridgeCtx = undefined;
-    const closing = bridge;
-    bridge = undefined;
-    await closing?.close();
   });
-
-  publishPhoneEndpoint();
 
   return {
     isActive: () => activeRun !== undefined || settling !== undefined,
     stop: stopActive,
-    attachBridge,
   };
 }
