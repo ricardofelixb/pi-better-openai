@@ -65,6 +65,7 @@ export interface LiveSessionControllerOptions {
   signal?: AbortSignal;
   native?: LiveNativeBindings;
   createTransport?: (options: LiveTransportOptions) => LiveTransport;
+  createMedia?: LiveTransportOptions["createMedia"];
   createAudioCapture?: (
     native: LiveNativeBindings,
     onAudio: (error: Error | null, samples: Float32Array) => void,
@@ -188,9 +189,15 @@ export class LiveSessionController {
         voice: this.#voice,
         signal: this.#options.signal,
         native,
+        createMedia: this.#options.createMedia,
         callbacks: {
           onEvent: (event) => this.#guardEvent(() => this.#handleLiveEvent(event)),
           onOutputLevel: (level) => this.#guardEvent(() => this.#handleOutputLevel(level)),
+          onInputLevel: (level) =>
+            this.#guardEvent(() => {
+              this.#inputLevel = this.#muted ? 0 : clampLevel(level);
+              this.#emitLevels();
+            }),
         },
       });
       this.#transport = transport;
@@ -198,11 +205,13 @@ export class LiveSessionController {
         if (error) this.#reportFailure(error);
         else this.#handleMicrophoneAudio(samples);
       };
-      const recorder = this.#createAudioCapture
-        ? this.#createAudioCapture(native, onAudio)
-        : new native.AudioCapture(16_000, onAudio);
+      const recorder = this.#options.createMedia
+        ? undefined
+        : this.#createAudioCapture
+          ? this.#createAudioCapture(native, onAudio)
+          : new native.AudioCapture(16_000, onAudio);
       if (this.#stopped) {
-        recorder.stop();
+        recorder?.stop();
         throw this.#failure ?? new Error("The live session stopped while recording began.");
       }
       this.#recorder = recorder;

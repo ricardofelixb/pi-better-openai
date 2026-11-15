@@ -25,7 +25,8 @@ export type HostFrame =
   | { type: "failure"; message: string };
 export type BridgeControlFrame =
   | { type: "start"; voice?: LiveVoice }
-  | { type: "stop" | "resume" }
+  | { type: "stop" }
+  | { type: "resume" }
   | { type: "set-muted"; muted: boolean };
 export type BridgeInboundFrame = BridgeControlFrame | HostFrame;
 export type BridgeOutboundFrame =

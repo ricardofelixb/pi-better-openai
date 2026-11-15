@@ -6,7 +6,11 @@ import { sanitizeDiagnosticError } from "../format.ts";
 // The session controller pulls the realtime transport (ws, undici, proxy
 // agents) and WebRTC glue. It is only needed once `/live` actually starts, so
 // it loads on first start instead of at extension registration.
-import type { LiveSessionControllerOptions, LiveTranscript } from "./controller.ts";
+import type {
+  LiveSessionCallbacks,
+  LiveSessionControllerOptions,
+  LiveTranscript,
+} from "./controller.ts";
 import { attachFocusReporting, probeFocusReporting, type FocusTerminalHandle } from "./focus.ts";
 import {
   LIVE_QUEUE_TICK_MS,
@@ -49,6 +53,18 @@ type LiveArbiterFactory = (
   options: LiveFloorArbiterOptions,
   callbacks: LiveFloorArbiterCallbacks,
 ) => LiveFloorArbiterLike;
+
+export interface LiveCall {
+  done: Promise<void>;
+  stop(): void;
+  setMuted(muted: boolean): void;
+}
+
+export interface LiveCallOptions {
+  createMedia: NonNullable<LiveSessionControllerOptions["createMedia"]>;
+  voice?: LiveSessionControllerOptions["voice"];
+  callbacks: Pick<LiveSessionCallbacks, "onPhase" | "onTranscript">;
+}
 
 export interface LiveRegistrationDependencies {
   createSession?: LiveSessionFactory;
@@ -99,7 +115,11 @@ export function registerOpenAILive(
   pi: ExtensionAPI,
   getConfig: (ctx: ExtensionContext) => ResolvedConfig,
   dependencies: LiveRegistrationDependencies = {},
-): { isActive(): boolean; stop(): Promise<void> } {
+): {
+  isActive(): boolean;
+  stop(): Promise<void>;
+  startCall(ctx: ExtensionContext, options: LiveCallOptions): LiveCall;
+} {
   let createSession: LiveSessionFactory | undefined = dependencies.createSession;
   const loadSessionFactory = async (): Promise<LiveSessionFactory> => {
     if (createSession) return createSession;
@@ -125,6 +145,84 @@ export function registerOpenAILive(
     }
     run.finishUi({});
     await run.dispose();
+  }
+
+  // A media-hosted call shares command/event lifecycle, but does not enroll native devices in the floor queue.
+  function startCall(ctx: ExtensionContext, options: LiveCallOptions): LiveCall {
+    if (activeRun || settling) throw new Error("Live voice is already on in this Pi.");
+    if (ctx.mode !== "tui") throw new Error("Live voice requires interactive TUI mode.");
+    const cfg = getConfig(ctx);
+    if (!cfg.live.enabled)
+      throw new Error("Live voice is disabled. Enable it in /openai-settings.");
+    let session: LiveSessionRuntime | undefined;
+    let completed = false;
+    let muted = false;
+    let cleanup: Promise<void> | undefined;
+    let finish!: (result: LiveUiResult) => void;
+    const finished = new Promise<LiveUiResult>((resolve) => {
+      finish = resolve;
+    });
+    const run: ActiveLiveRun = {
+      getSession: () => session,
+      finishUi: (result) => {
+        if (!completed) {
+          completed = true;
+          finish(result);
+        }
+      },
+      dispose: () => (cleanup ??= session?.stop().catch(() => undefined) ?? Promise.resolve()),
+    };
+    activeRun = run; // Reserve synchronously, before the lazy import or client can race another start.
+    const done = (async () => {
+      try {
+        const factory = await loadSessionFactory();
+        if (completed) return;
+        session = factory({
+          sessionId: ctx.sessionManager.getSessionId(),
+          voice: options.voice ?? cfg.live.voice,
+          createMedia: options.createMedia,
+          getCredentials: (signal) => getCodexCredentials(ctx, signal),
+          delegate: (request) =>
+            pi.sendMessage(
+              {
+                customType: LIVE_DELEGATION_MESSAGE_TYPE,
+                content: request,
+                display: true,
+                details: { source: "live" },
+              },
+              { triggerTurn: true, deliverAs: "steer" },
+            ),
+          callbacks: {
+            onPhase: (phase) => {
+              if (!completed) options.callbacks.onPhase(phase);
+            },
+            onTranscript: (transcript) => {
+              if (!completed) options.callbacks.onTranscript(transcript);
+            },
+            onLevels: () => undefined,
+            onTerminal: (error) => run.finishUi(error ? { error } : {}),
+          },
+        });
+        if (muted) session.toggleMute();
+        void session.start().catch((cause) => run.finishUi({ error: errorFrom(cause) }));
+        const result = await finished;
+        if (result.error) throw result.error;
+      } finally {
+        completed = true;
+        await run.dispose();
+        if (activeRun === run) activeRun = undefined;
+      }
+    })();
+    return {
+      done,
+      stop: () => run.finishUi({}),
+      setMuted: (value) => {
+        if (!completed && value !== muted) {
+          muted = value;
+          session?.toggleMute();
+        }
+      },
+    };
   }
 
   async function start(ctx: ExtensionContext): Promise<void> {
@@ -357,5 +455,6 @@ export function registerOpenAILive(
   return {
     isActive: () => activeRun !== undefined || settling !== undefined,
     stop: stopActive,
+    startCall,
   };
 }

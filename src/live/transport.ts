@@ -30,9 +30,21 @@ type LiveSignalingResult = {
   attestation: string | undefined;
 };
 
+export interface LiveMediaCallbacks {
+  onEvent(payload: string): void;
+  onLevels(input: number, output: number): void;
+  onFailure(message: string): void;
+}
+
+export type LiveMedia = Omit<LiveWebRtcPeerInstance, "pushAudio"> & {
+  pushAudio?(samples: Float32Array): void;
+  activate?(): void;
+};
+
 export interface LiveTransportCallbacks {
   onEvent(event: LiveServerEvent): void;
   onOutputLevel(level: number): void;
+  onInputLevel?(level: number): void;
 }
 
 export interface LiveTransportOptions {
@@ -43,6 +55,7 @@ export interface LiveTransportOptions {
   callbacks: LiveTransportCallbacks;
   signal?: AbortSignal;
   native?: LiveNativeBindings;
+  createMedia?: (callbacks: LiveMediaCallbacks, signal?: AbortSignal) => LiveMedia;
 }
 
 function errorFrom(cause: unknown): Error {
@@ -119,7 +132,7 @@ export class CodexLiveTransport {
   readonly #closeController = new AbortController();
   readonly #operationSignal: AbortSignal;
   readonly #abortListener: () => void;
-  #peer: LiveWebRtcPeerInstance | undefined;
+  #peer: LiveMedia | undefined;
   #sideband: WebSocket | undefined;
   #state: Lifecycle = "idle";
   #connectPromise: Promise<void> | undefined;
@@ -159,17 +172,30 @@ export class CodexLiveTransport {
   }
 
   async #connect(): Promise<void> {
-    const peer = new this.#native.LiveWebRtcPeer(
-      (error, payload) => {
-        if (error) this.#handlePeerFailure(error.message);
-        else this.#handleServerEvent(payload);
-      },
-      (error, level) => {
-        if (error) this.#handlePeerFailure(error.message);
-        else this.#handleOutputLevel(level);
-      },
-      (error, message) => this.#handlePeerFailure(error?.message ?? message),
-    );
+    const peer: LiveMedia =
+      this.#options.createMedia?.(
+        {
+          onEvent: (payload) => this.#handleServerEvent(payload),
+          onLevels: (input, output) => {
+            if (this.#state !== "connected") return;
+            this.#options.callbacks.onInputLevel?.(input);
+            this.#handleOutputLevel(output);
+          },
+          onFailure: (message) => this.#handlePeerFailure(message),
+        },
+        this.#operationSignal,
+      ) ??
+      new this.#native.LiveWebRtcPeer(
+        (error, payload) => {
+          if (error) this.#handlePeerFailure(error.message);
+          else this.#handleServerEvent(payload);
+        },
+        (error, level) => {
+          if (error) this.#handlePeerFailure(error.message);
+          else this.#handleOutputLevel(level);
+        },
+        (error, message) => this.#handlePeerFailure(error?.message ?? message),
+      );
     this.#peer = peer;
     const offer = await peer.createOffer();
     if (this.#state !== "connecting") throw abortReason(this.#operationSignal);
@@ -181,6 +207,7 @@ export class CodexLiveTransport {
     await this.#connectSideband(signaling.callId, signaling.credentials, signaling.attestation);
     if (this.#state !== "connecting") throw abortReason(this.#operationSignal);
     this.#state = "connected";
+    peer.activate?.();
   }
 
   async #signal(offer: string): Promise<LiveSignalingResult> {
@@ -404,7 +431,7 @@ export class CodexLiveTransport {
 
   pushAudio(samples: Float32Array): void {
     if (this.#state !== "connected" || this.#muted || samples.length === 0) return;
-    this.#peer?.pushAudio(samples);
+    this.#peer?.pushAudio?.(samples);
   }
 
   setMuted(muted: boolean): void {
