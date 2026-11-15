@@ -80,6 +80,7 @@ function parseObject(text: string): Record<string, unknown> {
   const frame = value as Record<string, unknown>;
   if (frame.v !== LIVE_MEDIA_PROTOCOL_VERSION)
     throw new ProtocolVersionError("Unsupported live bridge protocol version.");
+  if (typeof frame.type !== "string") throw new ProtocolError("Frame has an invalid type.");
   return frame;
 }
 function validate(frame: Record<string, unknown>, shape: Shape | undefined): void {
