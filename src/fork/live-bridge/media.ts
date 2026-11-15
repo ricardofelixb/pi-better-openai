@@ -2,9 +2,6 @@ import type { LiveMedia, LiveMediaCallbacks, LiveTransportOptions } from "../../
 import {
   type ClientFrame,
   type HostFrame,
-  FrameDecoder,
-  parseHostFrame,
-  encodeFrame,
   LIVE_MEDIA_PING_MS,
   MAX_REQUEST_TIMEOUT_MS,
 } from "./protocol.ts";
@@ -51,19 +48,9 @@ class BridgeMedia implements LiveMedia {
       await this.#request({ type: "request", method: "open" });
     });
     this.#ready.catch(() => undefined);
-    const decoder = new FrameDecoder(parseHostFrame);
-    connection.output.on("data", (chunk: Buffer) => {
-      if (this.#closed) return;
-      try {
-        for (const frame of decoder.push(chunk)) {
-          if (this.#closed) break;
-          this.#onFrame(frame);
-        }
-      } catch (cause) {
-        this.#fail(cause instanceof Error ? cause.message : String(cause));
-      }
+    connection.onMedia((frame) => {
+      if (!this.#closed) this.#onFrame(frame);
     });
-    connection.output.on("error", (error) => this.#fail(error.message));
     connection.onClose(() => this.#fail("Live media client disconnected."));
     if (signal?.aborted) this.#abort();
     else signal?.addEventListener("abort", this.#abort, { once: true });
@@ -103,7 +90,7 @@ class BridgeMedia implements LiveMedia {
     );
   }
   #write(frame: ClientFrame): void {
-    this.#connection.write(encodeFrame(frame));
+    this.#connection.send(frame);
   }
   #request(
     frame: Omit<Extract<ClientFrame, { type: "request" }>, "id"> & {
