@@ -35,7 +35,7 @@ describe("parseBridgeInbound", () => {
     expect(isBridgeControl(parseBridgeInbound(frame({ type: "resume" })))).toBe(true);
   });
 
-  test("hands every media frame to the remote host parser unchanged", () => {
+  test("hands every media frame to the media parser unchanged", () => {
     for (const body of [
       { type: "hello" },
       { type: "response", id: 3, ok: true, sdp: "v=0" },
@@ -91,6 +91,26 @@ describe("parseBridgeInbound", () => {
       "invalid input",
     );
     expect(() => parseBridgeInbound("not json")).toThrow(ProtocolError);
+  });
+
+  test("rejects non-string frame types instead of coercing them", () => {
+    expect(() => parseBridgeInbound(frame({ type: ["start"] }))).toThrow(ProtocolError);
+    expect(() => parseHostFrame(frame({ type: ["hello"] }))).toThrow(ProtocolError);
+  });
+
+  test("decodes fragmented UTF-8, blank lines and multiple frames, and stays failed", () => {
+    const decoder = new FrameDecoder(parseBridgeInbound);
+    const bytes = Buffer.from(
+      `${frame({ type: "event", payload: "héllo" })}\n\n${frame({ type: "stop" })}\n`,
+    );
+    const split = bytes.indexOf(0xc3) + 1;
+    expect(decoder.push(bytes.subarray(0, split))).toEqual([]);
+    expect(decoder.push(bytes.subarray(split))).toEqual([
+      { type: "event", payload: "héllo" },
+      { type: "stop" },
+    ]);
+    expect(() => decoder.push(Buffer.from([0xff, 0x0a]))).toThrow("UTF-8");
+    expect(() => decoder.push(`${frame({ type: "stop" })}\n`)).toThrow("UTF-8");
   });
 
   test("a frame decoder over it refuses an oversized line", () => {
