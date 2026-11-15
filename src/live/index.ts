@@ -136,6 +136,7 @@ export function registerOpenAILive(
   const tickMs = dependencies.tickMs ?? LIVE_QUEUE_TICK_MS;
   let activeRun: ActiveLiveRun | undefined;
   let settling: Promise<void> | undefined;
+  const isActive = () => activeRun !== undefined || settling !== undefined;
 
   async function stopActive(): Promise<void> {
     const run = activeRun;
@@ -149,7 +150,7 @@ export function registerOpenAILive(
 
   // A media-hosted call shares command/event lifecycle, but does not enroll native devices in the floor queue.
   function startCall(ctx: ExtensionContext, options: LiveCallOptions): LiveCall {
-    if (activeRun || settling) throw new Error("Live voice is already on in this Pi.");
+    if (isActive()) throw new Error("Live voice is already on in this Pi.");
     if (ctx.mode !== "tui") throw new Error("Live voice requires interactive TUI mode.");
     const cfg = getConfig(ctx);
     if (!cfg.live.enabled)
@@ -245,6 +246,7 @@ export function registerOpenAILive(
       return;
     }
 
+    if (isActive()) return; // A hosted call may have reserved the session during the lazy import.
     const result = await ctx.ui.custom<LiveUiResult>((tui, theme, _keybindings, done) => {
       let completed = false;
       let disposed = false;
@@ -453,7 +455,7 @@ export function registerOpenAILive(
   });
 
   return {
-    isActive: () => activeRun !== undefined || settling !== undefined,
+    isActive,
     stop: stopActive,
     startCall,
   };
