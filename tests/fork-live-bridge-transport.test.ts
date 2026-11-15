@@ -118,6 +118,61 @@ test("injected media negotiates SDP and activates without seeing credentials", a
   await transport.close();
   expect(fake.media.close).toHaveBeenCalledOnce();
 });
+test.each(["before start", "during connection"])(
+  "keeps media muted at activation when muted %s",
+  async (timing) => {
+    const fake = fakeMedia();
+    let muted: boolean | undefined;
+    let mutedAtActivation: boolean | undefined;
+    vi.mocked(fake.media.setMuted).mockImplementation((value) => {
+      muted = value;
+    });
+    vi.mocked(fake.media.activate!).mockImplementation(() => {
+      mutedAtActivation = muted;
+    });
+    let reachedPeerOpen!: () => void;
+    const peerOpening = new Promise<void>((resolve) => {
+      reachedPeerOpen = resolve;
+    });
+    let releasePeerOpen!: () => void;
+    const peerOpen = new Promise<void>((resolve) => {
+      releasePeerOpen = resolve;
+    });
+    vi.mocked(fake.media.waitForOpen).mockImplementation(() => {
+      reachedPeerOpen();
+      return peerOpen;
+    });
+    const controller = new LiveSessionController({
+      sessionId: "session",
+      getCredentials: async () => ({ accessToken: "secret-token", accountId: "acct_test" }),
+      native,
+      createMedia: fake.createMedia,
+      delegate: vi.fn(),
+      callbacks: {
+        onPhase: vi.fn(),
+        onLevels: vi.fn(),
+        onTranscript: vi.fn(),
+        onTerminal: vi.fn(),
+      },
+    });
+    if (timing === "before start") controller.toggleMute();
+    const starting = controller.start();
+    try {
+      await peerOpening;
+      if (timing === "during connection") {
+        expect(muted).toBe(false); // The initial state has already reached the peer.
+        controller.toggleMute();
+      }
+      releasePeerOpen();
+      await starting;
+      expect(mutedAtActivation).toBe(true);
+    } finally {
+      releasePeerOpen();
+      await starting;
+      await controller.stop();
+    }
+  },
+);
 test("injected levels and failures reach the controller boundary, but go quiet on close", async () => {
   const fake = fakeMedia();
   const { transport, callbacks } = transportFor(fake);
