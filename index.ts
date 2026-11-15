@@ -84,6 +84,7 @@ import { ResetController } from "./src/reset-controller.ts";
 import { registerOpenAIImage, _imageTest } from "./src/image.ts";
 import { registerOpenAIWebSearch, _websearchTest } from "./src/websearch.ts";
 import { registerOpenAILive } from "./src/live/index.ts";
+import { registerLiveBridge } from "./src/fork/live-bridge/index.ts";
 import { registerOpenAIDecisions } from "./src/decisions.ts";
 import type { OptionalTool } from "./src/optional-tool.ts";
 import {
@@ -1164,7 +1165,7 @@ export default function betterOpenAI(pi: ExtensionAPI): void {
   optionalTools.set("websearch", registerOpenAIWebSearch(pi, config));
   optionalTools.set("decisions", registerOpenAIDecisions(pi, config, refresh));
   if (cachedConfig) syncToolExposure(cachedConfig);
-  const live = registerOpenAILive(pi, config);
+  registerLiveBridge(pi, registerOpenAILive(pi, config));
   registerOpenAIPets(pi, {
     wake: async (ctx, slug) => {
       const pets = await listCodexPets();
@@ -1508,7 +1509,6 @@ export default function betterOpenAI(pi: ExtensionAPI): void {
     invalidateSessionName();
     multiproviderRefreshCtx = ctx;
     const nextConfig = refresh(ctx);
-    void live.attachBridge(ctx);
     fastController.initializeForSession(ctx, nextConfig);
     if (
       fastController.desiredActive !== nextConfig.desiredActive ||

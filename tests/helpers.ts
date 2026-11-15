@@ -9,11 +9,7 @@ import {
   type ResolvedConfig,
 } from "../src/config.ts";
 
-export function makeResolvedConfig(
-  overrides: Omit<Partial<ResolvedConfig>, "live"> & {
-    live?: Partial<ResolvedConfig["live"]>;
-  } = {},
-): ResolvedConfig {
+export function makeResolvedConfig(overrides: Partial<ResolvedConfig> = {}): ResolvedConfig {
   return {
     configPath: "",
     projectConfigPath: "",
@@ -30,8 +26,8 @@ export function makeResolvedConfig(
     footer: DEFAULT_FOOTER_CONFIG,
     image: DEFAULT_IMAGE_CONFIG,
     websearch: DEFAULT_WEBSEARCH_CONFIG,
+    live: DEFAULT_LIVE_CONFIG,
     pets: DEFAULT_PET_CONFIG,
     ...overrides,
-    live: { ...DEFAULT_LIVE_CONFIG, ...overrides.live },
   };
 }

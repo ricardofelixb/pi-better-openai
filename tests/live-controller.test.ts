@@ -1,10 +1,7 @@
 import { describe, expect, test, vi } from "vitest";
-import {
-  LiveSessionController,
-  type LiveSessionControllerOptions,
-} from "../src/live/controller.ts";
+import { LiveSessionController } from "../src/live/controller.ts";
 import type { LiveNativeBindings } from "../src/live/native.ts";
-import { chunkLiveContext, type LiveClientMessage } from "../src/live/protocol.ts";
+import type { LiveClientMessage } from "../src/live/protocol.ts";
 import type { LiveTransportOptions } from "../src/live/transport.ts";
 
 function fakeNative(): LiveNativeBindings {
@@ -30,7 +27,7 @@ function fakeNative(): LiveNativeBindings {
 }
 
 async function flushSends(): Promise<void> {
-  await new Promise((resolve) => setTimeout(resolve, 0));
+  for (let index = 0; index < 6; index += 1) await Promise.resolve();
 }
 
 describe("LiveSessionController", () => {
@@ -48,22 +45,21 @@ describe("LiveSessionController", () => {
       sessionId: "session-1",
       voice: "vale",
       native: fakeNative(),
-      getCredentials: vi.fn(async () => ({
-        accessToken: "token",
-        accountId: "account",
-      })),
+      getCredentials: vi.fn(async () => ({ accessToken: "token", accountId: "account" })),
       delegate,
       createTransport: (options) => {
         transportOptions = options;
         return {
           connect: vi.fn(async () => undefined),
           send,
+          pushAudio: vi.fn(),
           setMuted: vi.fn(),
           close: vi.fn(async () => {
             callOrder.push("close");
           }),
         };
       },
+      createAudioCapture: () => ({ stop: vi.fn() }),
       callbacks: {
         onPhase: (phase) => phases.push(phase),
         onLevels: vi.fn(),
@@ -74,14 +70,6 @@ describe("LiveSessionController", () => {
 
     await controller.start();
     expect(transportOptions?.voice).toBe("vale");
-    transportOptions?.callbacks.onEvent({
-      type: "input_transcript.added",
-      item: { text: "Run" },
-    });
-    transportOptions?.callbacks.onEvent({
-      type: "turn.done",
-      turn: { role: "user", transcript: "Run the tests." },
-    });
     transportOptions?.callbacks.onEvent({
       type: "delegation.created",
       item: {
@@ -126,6 +114,14 @@ describe("LiveSessionController", () => {
     });
     expect(controller.activeDelegationId).toBeUndefined();
 
+    transportOptions?.callbacks.onEvent({
+      type: "input_transcript.added",
+      item: { text: "Run" },
+    });
+    transportOptions?.callbacks.onEvent({
+      type: "turn.done",
+      turn: { role: "user", transcript: "Run the tests." },
+    });
     expect(transcripts.at(-1)).toEqual({
       role: "user",
       text: "Run the tests.",
@@ -139,451 +135,58 @@ describe("LiveSessionController", () => {
     expect(terminal).toHaveBeenCalledOnce();
   });
 
-  test("starts out knowing the chat, and hears what is typed during the call only silently", async () => {
-    let transportOptions: LiveTransportOptions | undefined;
-    const send = vi.fn(async (_message: LiveClientMessage) => undefined);
-    const controller = new LiveSessionController({
-      sessionId: "session-1",
-      chat: "User: My dog is called Biscuit.",
-      native: fakeNative(),
-      getCredentials: vi.fn(async () => ({
-        accessToken: "token",
-        accountId: "account",
-      })),
-      delegate: vi.fn(),
-      createTransport: (options) => {
-        transportOptions = options;
-        return {
-          connect: vi.fn(async () => undefined),
-          send,
-          setMuted: vi.fn(),
-          close: vi.fn(async () => undefined),
-        };
-      },
-      callbacks: {
-        onPhase: vi.fn(),
-        onLevels: vi.fn(),
-        onTranscript: vi.fn(),
-        onTerminal: vi.fn(),
-      },
-    });
-
-    await controller.start();
-    expect(transportOptions?.instructions).toContain("### Historical or Background Sources");
-    expect(transportOptions?.instructions).toContain("User: My dog is called Biscuit.");
-
-    transportOptions?.callbacks.onEvent({
-      type: "input_transcript.added",
-      item: { text: "Hello" },
-    });
-    controller.handleAgentMessage({ role: "user", content: "Run the build." });
-    controller.handleAgentMessage({
-      role: "assistant",
-      content: [{ type: "text", text: "Building." }],
-      stopReason: "toolUse",
-    });
-    controller.handleAgentMessage({
-      role: "assistant",
-      content: [{ type: "text", text: "The build passed." }],
-      stopReason: "stop",
-    });
-    transportOptions?.callbacks.onEvent({
-      type: "delegation.created",
-      item: {
-        type: "delegation",
-        target: "client",
-        id: "delegation-1",
-        content: [{ type: "input_text", text: "Fix it." }],
-      },
-    });
-    controller.handleAgentMessage({
-      role: "assistant",
-      content: [{ type: "text", text: "Fixed." }],
-      stopReason: "stop",
-    });
-    await flushSends();
-
-    const silent = send.mock.calls
-      .map(([message]) => message)
-      .filter((message) => message.type === "session.context.append" && !message.channel);
-    expect(silent).toEqual([
-      {
-        type: "session.context.append",
-        content: [
-          {
-            type: "input_text",
-            text: "Typed in the chat during the call. Do not read it out unless asked.\nUser: Run the build.",
-          },
-        ],
-      },
-      {
-        type: "session.context.append",
-        content: [
-          {
-            type: "input_text",
-            text: "Typed in the chat during the call. Do not read it out unless asked.\nAssistant: The build passed.",
-          },
-        ],
-      },
-    ]);
-    await controller.stop();
-  });
-
-  test("sends silent instructions and chat at connect before the user's first words", async () => {
-    let transportOptions: LiveTransportOptions | undefined;
-    const send = vi.fn(async (_message: LiveClientMessage) => undefined);
-    const controller = new LiveSessionController({
-      sessionId: "session-memory-context",
-      chat: `User: Is Shizuku ready?\n\nAssistant: Shizuku is ready.\n\n${"Assistant: more. ".repeat(900)}`,
-      native: fakeNative(),
-      getCredentials: vi.fn(async () => ({
-        accessToken: "token",
-        accountId: "account",
-      })),
-      delegate: vi.fn(),
-      createTransport: (options) => {
-        transportOptions = options;
-        return {
-          connect: vi.fn(async () => undefined),
-          send,
-          setMuted: vi.fn(),
-          close: vi.fn(async () => undefined),
-        };
-      },
-      callbacks: {
-        onPhase: vi.fn(),
-        onLevels: vi.fn(),
-        onTranscript: vi.fn(),
-        onTerminal: vi.fn(),
-      },
-    });
-
-    await controller.start();
-    await flushSends();
-    const instructions = transportOptions?.instructions ?? "";
-    const chunks = chunkLiveContext(instructions);
-    expect(chunks.length).toBeGreaterThan(1);
-    expect(send.mock.calls.map(([message]) => message)).toEqual(
-      chunks.map((text) => ({
-        type: "session.context.append",
-        channel: "commentary",
-        content: [{ type: "input_text", text }],
-      })),
-    );
-    expect(chunks.join("")).toBe(instructions);
-    expect(instructions).toContain(
-      "Do not react to them, read them out or speak until the user does",
-    );
-    await controller.stop();
-  });
-
-  test("tells the voice the chat is its own memory and that short follow-ups are about its latest turns", async () => {
-    let transportOptions: LiveTransportOptions | undefined;
-    const controller = new LiveSessionController({
-      sessionId: "session-memory",
-      chat: "User: Is Shizuku ready?\n\nAssistant: Shizuku is ready.",
-      native: fakeNative(),
-      getCredentials: vi.fn(async () => ({
-        accessToken: "token",
-        accountId: "account",
-      })),
-      delegate: vi.fn(),
-      createTransport: (options) => {
-        transportOptions = options;
-        return {
-          connect: vi.fn(async () => undefined),
-          send: vi.fn(async () => undefined),
-          setMuted: vi.fn(),
-          close: vi.fn(async () => undefined),
-        };
-      },
-      callbacks: {
-        onPhase: vi.fn(),
-        onLevels: vi.fn(),
-        onTranscript: vi.fn(),
-        onTerminal: vi.fn(),
-      },
-    });
-
-    await controller.start();
-    const instructions = transportOptions?.instructions ?? "";
-    expect(instructions).toContain("your own memory");
-    expect(instructions).toContain("is it fixed");
-    expect(instructions).toContain("Never ask what they mean");
-    expect(instructions).toContain("For greetings or small talk, reply briefly in kind");
-    expect(instructions).toContain(
-      "do not recap the chat or bring up a topic the user did not raise",
-    );
-    expect(instructions).toContain("If asked what's new, use the newest turns in Current State");
-    // the one-assistant and delegation rules stay
-    expect(instructions).toContain("one assistant");
-    expect(instructions).toContain("delegation");
-    // the guide's labeled sections, with current state last for recency
-    const at = (heading: string) => instructions.indexOf(heading);
-    for (const heading of [
-      "# Role and Objective",
-      "# Personality and Tone",
-      "# Tools",
-      "# Long Context Behavior",
-      "## Context",
-    ])
-      expect(at(heading), heading).toBeGreaterThanOrEqual(0);
-    expect(at("# Long Context Behavior")).toBeLessThan(at("## Context"));
-    expect(at("## Context")).toBeLessThan(at("### Current State"));
-    expect(instructions).toContain("Current State wins");
-    expect(at("### Current State")).toBeGreaterThan(at("Never ask what they mean"));
-    expect(instructions.indexOf("### Historical or Background Sources")).toBeLessThan(
-      instructions.indexOf("### Current State"),
-    );
-    await controller.stop();
-  });
-
-  test("reports what the server echoed of the instructions against what was sent", async () => {
-    let transportOptions: LiveTransportOptions | undefined;
-    const onInstructionsEcho = vi.fn();
-    const controller = new LiveSessionController({
-      sessionId: "session-echo",
-      chat: "User: hello",
-      native: fakeNative(),
-      getCredentials: vi.fn(async () => ({
-        accessToken: "token",
-        accountId: "account",
-      })),
-      delegate: vi.fn(),
-      createTransport: (options) => {
-        transportOptions = options;
-        return {
-          connect: vi.fn(async () => undefined),
-          send: vi.fn(async () => undefined),
-          setMuted: vi.fn(),
-          close: vi.fn(async () => undefined),
-        };
-      },
-      callbacks: {
-        onPhase: vi.fn(),
-        onLevels: vi.fn(),
-        onTranscript: vi.fn(),
-        onTerminal: vi.fn(),
-        onInstructionsEcho,
-      },
-    });
-
-    await controller.start();
-    const sent = transportOptions!.instructions;
-    // no echo, no report
-    transportOptions?.callbacks.onEvent({
-      type: "session.started",
-      session: { id: "s" },
-    });
-    expect(onInstructionsEcho).not.toHaveBeenCalled();
-
-    transportOptions?.callbacks.onEvent({
-      type: "session.started",
-      session: { id: "s", instructions: sent },
-    });
-    expect(onInstructionsEcho).toHaveBeenLastCalledWith({
-      sent: sent.length,
-      echoed: sent.length,
-    });
-
-    transportOptions?.callbacks.onEvent({
-      type: "session.updated",
-      session: { id: "s", instructions: sent.slice(0, 100) },
-    });
-    expect(onInstructionsEcho).toHaveBeenLastCalledWith({
-      sent: sent.length,
-      echoed: 100,
-    });
-    expect(controller.instructionsEcho).toEqual({
-      sent: sent.length,
-      echoed: 100,
-    });
-    await controller.stop();
-  });
-
-  test("owns no capture: the transport alone is created and connected on start", async () => {
-    const createTransport = vi.fn((_options: LiveTransportOptions) => ({
-      connect: vi.fn(async () => undefined),
-      send: vi.fn(async () => undefined),
-      setMuted: vi.fn(),
-      close: vi.fn(async () => undefined),
-    }));
-    const native = fakeNative();
-    const captureSpy = vi.spyOn(native, "AudioCapture");
-    const controller = new LiveSessionController({
-      sessionId: "session-no-capture",
-      native,
-      getCredentials: vi.fn(async () => ({
-        accessToken: "token",
-        accountId: "account",
-      })),
-      delegate: vi.fn(),
-      createTransport,
-      callbacks: {
-        onPhase: vi.fn(),
-        onLevels: vi.fn(),
-        onTranscript: vi.fn(),
-        onTerminal: vi.fn(),
-      },
-    });
-
-    await controller.start();
-    expect(createTransport).toHaveBeenCalledOnce();
-    expect(createTransport.mock.calls[0]?.[0].native).toBe(native);
-    expect(captureSpy).not.toHaveBeenCalled();
-    await controller.stop();
-  });
-
-  test("turns transport levels into UI levels and the speaking phase, without leaving connecting early", async () => {
-    let transportOptions: LiveTransportOptions | undefined;
+  test("starts microphone capture before transport negotiation completes", async () => {
     let finishConnect: (() => void) | undefined;
     const connect = new Promise<void>((resolve) => {
       finishConnect = resolve;
     });
-    const phases: string[] = [];
-    const onLevels = vi.fn();
+    const createAudioCapture = vi.fn(() => ({ stop: vi.fn() }));
     const controller = new LiveSessionController({
-      sessionId: "session-levels",
+      sessionId: "session-connecting",
       native: fakeNative(),
-      getCredentials: vi.fn(async () => ({
-        accessToken: "token",
-        accountId: "account",
-      })),
+      getCredentials: vi.fn(async () => ({ accessToken: "token", accountId: "account" })),
       delegate: vi.fn(),
-      createTransport: (options) => {
-        transportOptions = options;
-        return {
-          connect: () => connect,
-          send: vi.fn(async () => undefined),
-          setMuted: vi.fn(),
-          close: vi.fn(async () => undefined),
-        };
-      },
+      createTransport: () => ({
+        connect: () => connect,
+        send: vi.fn(async () => undefined),
+        pushAudio: vi.fn(),
+        setMuted: vi.fn(),
+        close: vi.fn(async () => undefined),
+      }),
+      createAudioCapture,
       callbacks: {
-        onPhase: (phase) => phases.push(phase),
-        onLevels,
+        onPhase: vi.fn(),
+        onLevels: vi.fn(),
         onTranscript: vi.fn(),
         onTerminal: vi.fn(),
       },
     });
 
     const start = controller.start();
-    transportOptions?.callbacks.onLevels(0.4, 0);
-    expect(onLevels).toHaveBeenLastCalledWith(0.4, 0);
-    expect(phases).toEqual(["connecting"]);
-
+    expect(createAudioCapture).toHaveBeenCalledOnce();
     finishConnect?.();
     await start;
-    expect(controller.phase).toBe("listening");
-    transportOptions?.callbacks.onEvent({
-      type: "input_transcript.added",
-      item: { text: "Hello" },
-    });
-    transportOptions?.callbacks.onLevels(0.1, 0.5);
-    expect(onLevels).toHaveBeenLastCalledWith(0.1, 0.5);
-    expect(controller.phase).toBe("speaking");
-    transportOptions?.callbacks.onLevels(0.1, 0);
-    expect(controller.phase).toBe("listening");
     await controller.stop();
   });
 
-  test("mute zeroes the input level, informs the transport, and wins over speaking", async () => {
-    let transportOptions: LiveTransportOptions | undefined;
-    const setMuted = vi.fn();
-    const onLevels = vi.fn();
+  test("reports privacy-filtered zero-only microphone input", async () => {
+    let onAudio: ((error: Error | null, samples: Float32Array) => void) | undefined;
+    const terminal = vi.fn();
     const controller = new LiveSessionController({
-      sessionId: "session-mute",
+      sessionId: "session-silent",
       native: fakeNative(),
-      getCredentials: vi.fn(async () => ({
-        accessToken: "token",
-        accountId: "account",
-      })),
-      delegate: vi.fn(),
-      createTransport: (options) => {
-        transportOptions = options;
-        return {
-          connect: vi.fn(async () => undefined),
-          send: vi.fn(async () => undefined),
-          setMuted,
-          close: vi.fn(async () => undefined),
-        };
-      },
-      callbacks: {
-        onPhase: vi.fn(),
-        onLevels,
-        onTranscript: vi.fn(),
-        onTerminal: vi.fn(),
-      },
-    });
-
-    await controller.start();
-    expect(setMuted).toHaveBeenLastCalledWith(false);
-    transportOptions?.callbacks.onEvent({
-      type: "input_transcript.added",
-      item: { text: "Hello" },
-    });
-    transportOptions?.callbacks.onLevels(0.4, 0.2);
-    controller.toggleMute();
-    expect(controller.muted).toBe(true);
-    expect(controller.phase).toBe("muted");
-    expect(onLevels).toHaveBeenLastCalledWith(0, 0.2);
-    expect(setMuted).toHaveBeenLastCalledWith(true);
-    await controller.stop();
-  });
-
-  test("silences the transport microphone before queued sends drain, then closes it last", async () => {
-    const order: string[] = [];
-    const controller = new LiveSessionController({
-      sessionId: "session-stop-order",
-      native: fakeNative(),
-      getCredentials: vi.fn(async () => ({
-        accessToken: "token",
-        accountId: "account",
-      })),
+      getCredentials: vi.fn(async () => ({ accessToken: "token", accountId: "account" })),
       delegate: vi.fn(),
       createTransport: () => ({
         connect: vi.fn(async () => undefined),
-        send: vi.fn(async (message: LiveClientMessage) => {
-          order.push(`send:${message.type}`);
-        }),
-        setMuted: vi.fn((muted: boolean) => order.push(`muted:${muted}`)),
-        close: vi.fn(async () => {
-          order.push("close");
-        }),
+        send: vi.fn(async () => undefined),
+        pushAudio: vi.fn(),
+        setMuted: vi.fn(),
+        close: vi.fn(async () => undefined),
       }),
-      callbacks: {
-        onPhase: vi.fn(),
-        onLevels: vi.fn(),
-        onTranscript: vi.fn(),
-        onTerminal: vi.fn(),
-      },
-    });
-
-    await controller.start();
-    order.length = 0;
-    await controller.stop();
-    expect(order).toEqual(["muted:true", "send:session.close", "close"]);
-  });
-
-  test("reports a transport media failure as the terminal error", async () => {
-    let transportOptions: LiveTransportOptions | undefined;
-    const terminal = vi.fn();
-    const controller = new LiveSessionController({
-      sessionId: "session-failure",
-      native: fakeNative(),
-      getCredentials: vi.fn(async () => ({
-        accessToken: "token",
-        accountId: "account",
-      })),
-      delegate: vi.fn(),
-      createTransport: (options) => {
-        transportOptions = options;
-        return {
-          connect: vi.fn(async () => undefined),
-          send: vi.fn(async () => undefined),
-          setMuted: vi.fn(),
-          close: vi.fn(async () => undefined),
-        };
+      createAudioCapture: (_native, callback) => {
+        onAudio = callback;
+        return { stop: vi.fn() };
       },
       callbacks: {
         onPhase: vi.fn(),
@@ -594,89 +197,60 @@ describe("LiveSessionController", () => {
     });
 
     await controller.start();
-    transportOptions?.callbacks.onEvent({
-      type: "error",
-      message: "Microphone input contains only digital silence.",
-    });
+    onAudio?.(null, new Float32Array(32_000));
+
     expect(terminal).toHaveBeenCalledOnce();
+    expect(terminal.mock.calls[0]?.[0]).toBeInstanceOf(Error);
     expect(terminal.mock.calls[0]?.[0]?.message).toContain("only digital silence");
     await controller.stop();
   });
 
-  describe("where the media lives", () => {
-    function startable(overrides: Partial<LiveSessionControllerOptions>) {
-      const created: LiveTransportOptions[] = [];
-      const terminal = vi.fn();
-      const controller = new LiveSessionController({
-        sessionId: "session-1",
-        native: fakeNative(),
-        getCredentials: vi.fn(async () => undefined),
-        delegate: vi.fn(),
-        createTransport: (options) => {
-          created.push(options);
-          return {
-            connect: vi.fn(async () => undefined),
-            send: vi.fn(async () => undefined),
-            setMuted: vi.fn(),
-            close: vi.fn(async () => undefined),
-          };
-        },
-        callbacks: {
-          onPhase: vi.fn(),
-          onLevels: vi.fn(),
-          onTranscript: vi.fn(),
-          onTerminal: terminal,
-        },
-        ...overrides,
-      });
-      return { controller, created, terminal };
-    }
-
-    test("asks at each start and gives the transport the media it was told to use", async () => {
-      const createMedia = vi.fn();
-      const resolveMedia = vi.fn(async () => createMedia);
-      const { controller, created } = startable({ resolveMedia });
-      await controller.start();
-      expect(resolveMedia).toHaveBeenCalledOnce();
-      expect(created[0]?.createMedia).toBe(createMedia);
+  test("suppresses likely speaker echo, permits barge-in, and honors mute", async () => {
+    let transportOptions: LiveTransportOptions | undefined;
+    let onAudio: ((error: Error | null, samples: Float32Array) => void) | undefined;
+    const pushAudio = vi.fn();
+    const setMuted = vi.fn();
+    const controller = new LiveSessionController({
+      sessionId: "session-2",
+      native: fakeNative(),
+      getCredentials: vi.fn(async () => ({ accessToken: "token", accountId: "account" })),
+      delegate: vi.fn(),
+      createTransport: (options) => {
+        transportOptions = options;
+        return {
+          connect: vi.fn(async () => undefined),
+          send: vi.fn(async () => undefined),
+          pushAudio,
+          setMuted,
+          close: vi.fn(async () => undefined),
+        };
+      },
+      createAudioCapture: (_native, callback) => {
+        onAudio = callback;
+        return { stop: vi.fn() };
+      },
+      callbacks: {
+        onPhase: vi.fn(),
+        onLevels: vi.fn(),
+        onTranscript: vi.fn(),
+        onTerminal: vi.fn(),
+      },
     });
 
-    test("keeps the transport's own local media when nothing else is chosen", async () => {
-      const { controller, created } = startable({
-        resolveMedia: async () => undefined,
-      });
-      await controller.start();
-      expect(created[0]).toBeDefined();
-      expect(created[0]?.createMedia).toBeUndefined();
-      const plain = startable({});
-      await plain.controller.start();
-      expect(plain.created[0]?.createMedia).toBeUndefined();
-    });
+    await controller.start();
+    transportOptions?.callbacks.onOutputLevel(0.5);
+    onAudio?.(null, new Float32Array([0.1, -0.1, 0.1, -0.1]));
+    expect(pushAudio).not.toHaveBeenCalled();
+    const loud = new Float32Array([0.8, -0.8, 0.8, -0.8]);
+    onAudio?.(null, loud);
+    expect(pushAudio).toHaveBeenCalledWith(loud);
 
-    test("a refused route fails the start without creating any transport", async () => {
-      const refusal = new Error("Herdr cannot tell which computer typed");
-      const { controller, created, terminal } = startable({
-        resolveMedia: async () => {
-          throw refusal;
-        },
-      });
-      await expect(controller.start()).rejects.toBe(refusal);
-      expect(created).toEqual([]);
-      expect(terminal).toHaveBeenCalledOnce();
-      expect(terminal).toHaveBeenCalledWith(refusal);
-    });
+    controller.toggleMute();
+    expect(controller.muted).toBe(true);
+    expect(setMuted).toHaveBeenLastCalledWith(true);
+    onAudio?.(null, loud);
+    expect(pushAudio).toHaveBeenCalledOnce();
 
-    test("stopping while the route is being worked out leaves nothing behind", async () => {
-      let answer!: (media: undefined) => void;
-      const { controller, created } = startable({
-        resolveMedia: () => new Promise((resolve) => (answer = resolve)),
-      });
-      const starting = controller.start();
-      starting.catch(() => undefined);
-      await controller.stop();
-      answer(undefined);
-      await expect(starting).rejects.toThrow();
-      expect(created).toEqual([]);
-    });
+    await controller.stop();
   });
 });

@@ -5,19 +5,19 @@ import {
   MAX_ENDED_ERROR_LENGTH,
   MAX_TRANSCRIPT_LENGTH,
   parseBridgeInbound,
-} from "../src/live/bridge/protocol.ts";
+} from "../src/fork/live-bridge/protocol.ts";
 import {
   FrameDecoder,
   MAX_FRAME_BYTES,
   ProtocolError,
   ProtocolVersionError,
   parseHostFrame,
-} from "../src/live/remote/protocol.ts";
+} from "../src/fork/live-bridge/protocol.ts";
 
 const frame = (body: Record<string, unknown>, v = 1) => JSON.stringify({ v, ...body });
 
 describe("parseBridgeInbound", () => {
-  test("accepts the three control frames the phone may send", () => {
+  test("accepts the control frames a client may send", () => {
     expect(parseBridgeInbound(frame({ type: "start" }))).toEqual({ type: "start" });
     expect(parseBridgeInbound(frame({ type: "start", voice: "arbor" }))).toEqual({
       type: "start",
@@ -35,7 +35,7 @@ describe("parseBridgeInbound", () => {
     expect(isBridgeControl(parseBridgeInbound(frame({ type: "resume" })))).toBe(true);
   });
 
-  test("hands every media frame to the remote host parser unchanged", () => {
+  test("hands every media frame to the media parser unchanged", () => {
     for (const body of [
       { type: "hello" },
       { type: "response", id: 3, ok: true, sdp: "v=0" },
@@ -56,7 +56,7 @@ describe("parseBridgeInbound", () => {
     expect(isBridgeControl(parseBridgeInbound(frame({ type: "hello" })))).toBe(false);
   });
 
-  test("rejects frames the phone has no business sending", () => {
+  test("rejects frames the client has no business sending", () => {
     for (const body of [
       { type: "ready", pid: 1, busy: false },
       { type: "request", id: 1, method: "open" },
@@ -91,6 +91,26 @@ describe("parseBridgeInbound", () => {
       "invalid input",
     );
     expect(() => parseBridgeInbound("not json")).toThrow(ProtocolError);
+  });
+
+  test("rejects non-string frame types instead of coercing them", () => {
+    expect(() => parseBridgeInbound(frame({ type: ["start"] }))).toThrow(ProtocolError);
+    expect(() => parseHostFrame(frame({ type: ["hello"] }))).toThrow(ProtocolError);
+  });
+
+  test("decodes fragmented UTF-8, blank lines and multiple frames, and stays failed", () => {
+    const decoder = new FrameDecoder(parseBridgeInbound);
+    const bytes = Buffer.from(
+      `${frame({ type: "event", payload: "héllo" })}\n\n${frame({ type: "stop" })}\n`,
+    );
+    const split = bytes.indexOf(0xc3) + 1;
+    expect(decoder.push(bytes.subarray(0, split))).toEqual([]);
+    expect(decoder.push(bytes.subarray(split))).toEqual([
+      { type: "event", payload: "héllo" },
+      { type: "stop" },
+    ]);
+    expect(() => decoder.push(Buffer.from([0xff, 0x0a]))).toThrow("UTF-8");
+    expect(() => decoder.push(`${frame({ type: "stop" })}\n`)).toThrow("UTF-8");
   });
 
   test("a frame decoder over it refuses an oversized line", () => {
@@ -159,20 +179,6 @@ describe("encodeBridgeFrame", () => {
     expect(String(out.error).length).toBeLessThanOrEqual(MAX_ENDED_ERROR_LENGTH);
     expect([...String(out.error)].every((character) => character.charCodeAt(0) > 31)).toBe(true);
     expect(decoded(encodeBridgeFrame({ type: "ended" }))).toEqual({ v: 1, type: "ended" });
-  });
-
-  test("encodes the call's billed seconds and the park request", () => {
-    expect(decoded(encodeBridgeFrame({ type: "usage", seconds: 192 }))).toEqual({
-      v: 1,
-      type: "usage",
-      seconds: 192,
-    });
-    expect(decoded(encodeBridgeFrame({ type: "phase", phase: "parked" }))).toEqual({
-      v: 1,
-      type: "phase",
-      phase: "parked",
-    });
-    expect(decoded(encodeBridgeFrame({ type: "park" }))).toEqual({ v: 1, type: "park" });
   });
 
   test("passes the media requests through the existing encoder", () => {

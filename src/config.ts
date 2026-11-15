@@ -154,12 +154,6 @@ export type WebsearchConfig = {
 export type LiveConfig = {
   enabled?: boolean;
   voice?: LiveVoice;
-  /** Empty: this computer. `auto`: the computer connected from. Otherwise an SSH host to use. */
-  audioHost?: string;
-  /** Seconds of silence, with no work running, after which a call hangs up. 0 never. */
-  idleHangupSeconds?: number;
-  /** Seconds a delegation runs, with nobody speaking, before the call parks. 0 never. */
-  parkAfterSeconds?: number;
 };
 
 export type PetConfig = {
@@ -262,9 +256,6 @@ export const DEFAULT_WEBSEARCH_CONFIG: Required<WebsearchConfig> = {
 export const DEFAULT_LIVE_CONFIG: Required<LiveConfig> = {
   enabled: true,
   voice: DEFAULT_LIVE_VOICE,
-  audioHost: "",
-  idleHangupSeconds: 120,
-  parkAfterSeconds: 20,
 };
 
 export const DEFAULT_PET_CONFIG: Required<PetConfig> = {
@@ -580,38 +571,6 @@ export const LIVE_SETTING_DESCRIPTORS: readonly SettingsOptionDescriptor[] = [
     description: "Voice used for realtime spoken responses.",
     parse: stringSetting,
   },
-  {
-    id: "live.audioHost",
-    section: "live",
-    key: "audioHost",
-    label: "Audio computer (SSH)",
-    currentValue: (cfg) => cfg.live.audioHost || "not set",
-    description:
-      "Whose microphone and speakers /live uses. Empty is this computer; `auto` is the computer you are connected from (needs Tailscale); otherwise an SSH host name, ssh config alias, or user@host. Edit `live.audioHost` in the config file.",
-    parse: (rawValue) => rawValue.trim(),
-  },
-  {
-    id: "live.idleHangupSeconds",
-    section: "live",
-    key: "idleHangupSeconds",
-    label: "Hang up when idle",
-    currentValue: (cfg) => String(cfg.live.idleHangupSeconds),
-    values: ["0", "60", "120", "300", "600"],
-    description:
-      "Seconds of silence, with no work running, after which a Live call hangs up. The plan is billed for every connected second, speaking or not. 0 never hangs up.",
-    parse: numberSetting,
-  },
-  {
-    id: "live.parkAfterSeconds",
-    section: "live",
-    key: "parkAfterSeconds",
-    label: "Park during work",
-    currentValue: (cfg) => String(cfg.live.parkAfterSeconds),
-    values: ["0", "10", "20", "30", "60"],
-    description:
-      "Seconds a delegated task runs with nobody speaking before the call parks: the voice session closes, which stops the plan's meter, and a fresh one says the result. 0 never parks.",
-    parse: numberSetting,
-  },
 ];
 
 export const PET_SETTING_DESCRIPTORS: readonly SettingsOptionDescriptor[] = [
@@ -923,14 +882,6 @@ export function readConfig(path: string): ConfigFile | undefined {
     config.live = {};
     if (typeof parsed.live.enabled === "boolean") config.live.enabled = parsed.live.enabled;
     if (isLiveVoice(parsed.live.voice)) config.live.voice = parsed.live.voice;
-    if (typeof parsed.live.audioHost === "string")
-      config.live.audioHost = parsed.live.audioHost.trim();
-    for (const key of ["idleHangupSeconds", "parkAfterSeconds"] as const) {
-      const seconds = parsed.live[key];
-      if (typeof seconds === "number" && Number.isFinite(seconds) && seconds >= 0) {
-        config.live[key] = Math.floor(seconds);
-      }
-    }
   }
   if (isRecord(parsed.pets)) {
     config.pets = {};

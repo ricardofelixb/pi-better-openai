@@ -17,16 +17,8 @@ import type {
   LiveFloorArbiterLike,
   LiveFloorArbiterOptions,
 } from "../src/live/queue.ts";
-import { OriginCancelled, OriginError, type MediaTarget } from "../src/live/remote/origin.ts";
-import type { ChooseComputer } from "../src/live/remote/origin.ts";
 import { LIVE_VISUALIZER_TOGGLE_KEY } from "../src/live/visualizer.ts";
-import { requestCodexUsage } from "../src/usage.ts";
 import { makeResolvedConfig } from "./helpers.ts";
-
-vi.mock("../src/usage.ts", async (importOriginal) => ({
-  ...(await importOriginal<typeof import("../src/usage.ts")>()),
-  requestCodexUsage: vi.fn(async () => undefined),
-}));
 
 type CommandOptions = {
   description?: string;
@@ -150,12 +142,12 @@ function makeCustomMock(captured: CapturedCustom) {
   });
 }
 
-function makeContext(custom: unknown, notify = vi.fn(), select = vi.fn()) {
+function makeContext(custom: unknown, notify = vi.fn()) {
   return {
     mode: "tui",
     cwd: "/project",
-    ui: { custom, notify, select },
-    sessionManager: { getSessionId: () => "session-7", getBranch: () => [] },
+    ui: { custom, notify },
+    sessionManager: { getSessionId: () => "session-7" },
     modelRegistry: {},
   } as unknown as ExtensionCommandContext;
 }
@@ -166,203 +158,10 @@ function makeSessionStub(options: LiveSessionControllerOptions) {
     start: vi.fn(async () => options.callbacks.onTerminal()),
     stop: vi.fn(async () => undefined),
     toggleMute: vi.fn(),
-    resume: vi.fn(),
     handleAgentMessage: vi.fn(),
     handleAgentSettled: vi.fn(),
   };
 }
-
-describe("live voice with audioHost auto", () => {
-  const LAPTOP: MediaTarget = { kind: "remote", host: "laptop", node: "nLAPTOP" };
-  const OFFERED = ["laptop", "this computer (omarchy)"];
-  const TITLE = "Which computer are you at?";
-
-  /** A lookup that finds several computers attached and returns the one that was chosen, as the real one does. */
-  const severalAttached = (notes: string[] = []) =>
-    vi.fn(async (choose?: ChooseComputer): Promise<MediaTarget> => {
-      const picked = await choose!(OFFERED, notes);
-      if (picked === undefined || !OFFERED.includes(picked)) throw new OriginCancelled();
-      return picked === "laptop" ? LAPTOP : { kind: "local" };
-    });
-
-  function setup(resolveTarget: (choose?: ChooseComputer) => Promise<MediaTarget>) {
-    const harness = createRegistrationHarness();
-    const sessions: Array<ReturnType<typeof makeSessionStub>> = [];
-    const arbiter = makeFakeArbiter();
-    const createArbiter = vi.fn(arbiter.createArbiter);
-    registerOpenAILive(
-      harness.pi,
-      () => makeResolvedConfig({ live: { enabled: true, voice: "sol", audioHost: "auto" } }),
-      {
-        createSession: (options) => {
-          const stub = makeSessionStub(options);
-          sessions.push(stub);
-          return stub;
-        },
-        createArbiter,
-        probeFocusReporting: vi.fn(async () => true),
-        attachFocusReporting: vi.fn(() => vi.fn()),
-        notifyActivatedUnfocused: vi.fn(),
-        tickMs: 60_000,
-        resolveTarget,
-      },
-    );
-    const captured: CapturedCustom = { component: undefined, tui: makeFakeTui() };
-    const custom = makeCustomMock(captured);
-    const notify = vi.fn();
-    const select = vi.fn();
-    return { harness, sessions, arbiter, createArbiter, custom, notify, select, captured };
-  }
-
-  test("asks which computer you are at, with the attached ones, before anything starts", async () => {
-    const t = setup(severalAttached(["100.96.150.42: Remote live voice does not support macOS."]));
-    t.select.mockResolvedValue("laptop");
-    const ctx = makeContext(t.custom, t.notify, t.select);
-    const run = commandFrom(t.harness).handler("", ctx);
-    await vi.waitFor(() => requireCallbacks(t.arbiter));
-
-    expect(t.select).toHaveBeenCalledOnce();
-    expect(t.select).toHaveBeenCalledWith(TITLE, OFFERED);
-    expect(t.notify).toHaveBeenCalledWith(
-      expect.stringContaining("Not offered: 100.96.150.42"),
-      "info",
-    );
-    // The prompt came before the voice UI and before any session or microphone.
-    expect(t.select.mock.invocationCallOrder[0]).toBeLessThan(
-      t.custom.mock.invocationCallOrder[0]!,
-    );
-    expect(t.sessions).toHaveLength(0);
-
-    requireCallbacks(t.arbiter).onActivated("focus");
-    await run;
-    await expect(t.sessions[0]!.options.resolveMedia!()).resolves.toBeTypeOf("function");
-  });
-
-  test("choosing this computer keeps the local media", async () => {
-    const t = setup(severalAttached());
-    t.select.mockResolvedValue("this computer (omarchy)");
-    const run = commandFrom(t.harness).handler("", makeContext(t.custom, t.notify, t.select));
-    await vi.waitFor(() => requireCallbacks(t.arbiter));
-    requireCallbacks(t.arbiter).onActivated("focus");
-    await run;
-    await expect(t.sessions[0]!.options.resolveMedia!()).resolves.toBeUndefined();
-  });
-
-  test("Escape opens nothing: no voice UI, no floor, no session, and a short notice", async () => {
-    const t = setup(severalAttached());
-    t.select.mockResolvedValue(undefined);
-    await commandFrom(t.harness).handler("", makeContext(t.custom, t.notify, t.select));
-
-    expect(t.custom).not.toHaveBeenCalled();
-    expect(t.createArbiter).not.toHaveBeenCalled();
-    expect(t.sessions).toHaveLength(0);
-    expect(t.notify).toHaveBeenCalledWith(expect.stringMatching(/No computer was chosen/), "info");
-  });
-
-  test("a refusal opens nothing either, and says why", async () => {
-    const t = setup(async () => {
-      throw new OriginError(
-        "Pi can't tell. Set live.audioHost to the SSH host of the computer to use.",
-      );
-    });
-    await commandFrom(t.harness).handler("", makeContext(t.custom, t.notify, t.select));
-    expect(t.select).not.toHaveBeenCalled();
-    expect(t.custom).not.toHaveBeenCalled();
-    expect(t.notify).toHaveBeenCalledWith(expect.stringMatching(/live\.audioHost/), "error");
-  });
-
-  test("one computer found asks nothing", async () => {
-    const t = setup(async () => LAPTOP);
-    const run = commandFrom(t.harness).handler("", makeContext(t.custom, t.notify, t.select));
-    await vi.waitFor(() => requireCallbacks(t.arbiter));
-    requireCallbacks(t.arbiter).onActivated("focus");
-    await run;
-    expect(t.select).not.toHaveBeenCalled();
-    await expect(t.sessions[0]!.options.resolveMedia!()).resolves.toBeTypeOf("function");
-  });
-
-  test("a start that waits for the floor keeps the choice, and is not asked again", async () => {
-    const resolveTarget = severalAttached();
-    const t = setup(resolveTarget);
-    t.select.mockResolvedValue("laptop");
-    const ctx = makeContext(t.custom, t.notify, t.select);
-    const run = commandFrom(t.harness).handler("", ctx);
-    await vi.waitFor(() => requireCallbacks(t.arbiter));
-    // Queued: the prompt is already behind us, and nothing has started.
-    expect(t.sessions).toHaveLength(0);
-    expect(t.select).toHaveBeenCalledOnce();
-
-    requireCallbacks(t.arbiter).onActivated("fifo");
-    await vi.waitFor(() => {
-      if (t.sessions.length !== 1) throw new Error("not activated yet");
-    });
-    requireCallbacks(t.arbiter).onDeactivated();
-    await vi.waitFor(() => {
-      if (t.sessions[0]!.stop.mock.calls.length !== 1) throw new Error("not parked yet");
-    });
-    requireCallbacks(t.arbiter).onActivated("fifo");
-    await vi.waitFor(() => {
-      if (t.sessions.length !== 2) throw new Error("not activated again yet");
-    });
-
-    for (const session of t.sessions) {
-      await expect(session.options.resolveMedia!()).resolves.toBeTypeOf("function");
-    }
-    expect(resolveTarget).toHaveBeenCalledOnce();
-    expect(t.select).toHaveBeenCalledOnce();
-    commandFrom(t.harness)
-      .handler("", ctx)
-      .catch(() => undefined);
-    await run;
-  });
-
-  test("a second /live while the question is open does not ask it twice", async () => {
-    let answer!: (label: string) => void;
-    const t = setup(severalAttached());
-    t.select.mockImplementation(() => new Promise<string>((resolve) => (answer = resolve)));
-    const ctx = makeContext(t.custom, t.notify, t.select);
-    const first = commandFrom(t.harness).handler("", ctx);
-    await vi.waitFor(() => expect(t.select).toHaveBeenCalledOnce());
-    await commandFrom(t.harness).handler("", ctx);
-    expect(t.select).toHaveBeenCalledOnce();
-
-    answer("laptop");
-    await vi.waitFor(() => requireCallbacks(t.arbiter));
-    requireCallbacks(t.arbiter).onActivated("focus");
-    await first;
-  });
-
-  test("an explicit host or no host never asks", async () => {
-    for (const audioHost of ["", "me@audio-pc"]) {
-      const harness = createRegistrationHarness();
-      const resolveTarget = vi.fn(async () => LAPTOP);
-      const arbiter = makeFakeArbiter();
-      registerOpenAILive(
-        harness.pi,
-        () => makeResolvedConfig({ live: { enabled: true, voice: "sol", audioHost } }),
-        {
-          createSession: (options) => makeSessionStub(options),
-          createArbiter: arbiter.createArbiter,
-          probeFocusReporting: vi.fn(async () => true),
-          attachFocusReporting: vi.fn(() => vi.fn()),
-          tickMs: 60_000,
-          resolveTarget,
-        },
-      );
-      const select = vi.fn();
-      const captured: CapturedCustom = { component: undefined, tui: makeFakeTui() };
-      const run = commandFrom(harness).handler(
-        "",
-        makeContext(makeCustomMock(captured), vi.fn(), select),
-      );
-      await vi.waitFor(() => requireCallbacks(arbiter));
-      requireCallbacks(arbiter).onActivated("focus");
-      await run;
-      expect(select).not.toHaveBeenCalled();
-      expect(resolveTarget).not.toHaveBeenCalled();
-    }
-  });
-});
 
 describe("registerOpenAILive", () => {
   test("registers the public command, non-conflicting toggle, renderer, and agent hooks", () => {
@@ -376,30 +175,10 @@ describe("registerOpenAILive", () => {
     expect(harness.events).toEqual(["message_end", "agent_settled", "session_shutdown"]);
   });
 
-  test("keeps the media host launcher fresh at registration, and survives that failing", () => {
-    const harness = createRegistrationHarness();
-    const registerLauncher = vi.fn(() => {
-      throw new Error("read-only home");
-    });
-    expect(() =>
-      registerOpenAILive(
-        harness.pi,
-        () => makeResolvedConfig({ live: { enabled: true, voice: "vale", audioHost: "" } }),
-        {
-          registerLauncher,
-        },
-      ),
-    ).not.toThrow();
-    expect(registerLauncher).toHaveBeenCalledOnce();
-    expect(registerLauncher).toHaveBeenCalledWith({
-      entry: expect.stringMatching(/media-host\.mjs$/),
-    });
-  });
-
   test("rejects non-TUI and disabled invocations before opening custom UI", async () => {
     const harness = createRegistrationHarness();
     registerOpenAILive(harness.pi, () =>
-      makeResolvedConfig({ live: { enabled: false, voice: "sol", audioHost: "" } }),
+      makeResolvedConfig({ live: { enabled: false, voice: "sol" } }),
     );
     const notify = vi.fn();
     const custom = vi.fn();
@@ -429,7 +208,7 @@ describe("registerOpenAILive", () => {
     const notifyUnfocused = vi.fn();
     registerOpenAILive(
       harness.pi,
-      () => makeResolvedConfig({ live: { enabled: true, voice: "vale", audioHost: "" } }),
+      () => makeResolvedConfig({ live: { enabled: true, voice: "vale" } }),
       {
         createSession: (options) => {
           const stub = makeSessionStub(options);
@@ -466,7 +245,6 @@ describe("registerOpenAILive", () => {
     expect(sessions).toHaveLength(1);
     expect(sessions[0]!.options.voice).toBe("vale");
     expect(sessions[0]!.options.sessionId).toBe("session-7");
-    expect(sessions[0]!.options.resolveMedia).toBeTypeOf("function");
     await expect(sessions[0]!.options.getCredentials()).resolves.toMatchObject({
       accessToken: "voice-codex-access",
       accountId: "acct_voice",
@@ -479,89 +257,13 @@ describe("registerOpenAILive", () => {
     expect(notifyUnfocused).not.toHaveBeenCalled();
   });
 
-  test("a second /live while the first is still starting cancels it: no panel, no session", async () => {
-    const harness = createRegistrationHarness();
-    const sessions: Array<ReturnType<typeof makeSessionStub>> = [];
-    const arbiter = makeFakeArbiter();
-    const live = registerOpenAILive(
-      harness.pi,
-      () => makeResolvedConfig({ live: { enabled: true, voice: "vale", audioHost: "" } }),
-      {
-        createSession: (options) => {
-          const stub = makeSessionStub(options);
-          sessions.push(stub);
-          return stub;
-        },
-        createArbiter: arbiter.createArbiter,
-        probeFocusReporting: vi.fn(async () => true),
-        attachFocusReporting: vi.fn(() => vi.fn()),
-        notifyActivatedUnfocused: vi.fn(),
-        tickMs: 60_000,
-      },
-    );
-    const captured: CapturedCustom = { component: undefined, tui: makeFakeTui() };
-    const custom = makeCustomMock(captured);
-    const ctx = makeContext(custom);
-
-    // no await between the two: the first has not yet loaded what it needs to open its panel
-    const first = commandFrom(harness).handler("", ctx);
-    expect(live.isActive()).toBe(true);
-    const second = commandFrom(harness).handler("", ctx);
-    await Promise.all([first, second]);
-
-    expect(custom).not.toHaveBeenCalled();
-    expect(sessions).toHaveLength(0);
-    expect(live.isActive()).toBe(false);
-
-    // and the call after that starts normally
-    const third = commandFrom(harness).handler("", ctx);
-    await vi.waitFor(() => {
-      requireCallbacks(arbiter);
-    });
-    requireCallbacks(arbiter).onActivated("focus");
-    await third;
-    expect(custom).toHaveBeenCalledOnce();
-    expect(sessions).toHaveLength(1);
-  });
-
-  test("hands the chosen audio host to the session, so it is reached over ssh", async () => {
-    const harness = createRegistrationHarness();
-    const sessions: Array<ReturnType<typeof makeSessionStub>> = [];
-    const arbiter = makeFakeArbiter();
-    registerOpenAILive(
-      harness.pi,
-      () => makeResolvedConfig({ live: { enabled: true, voice: "sol", audioHost: "me@audio-pc" } }),
-      {
-        createSession: (options) => {
-          const stub = makeSessionStub(options);
-          sessions.push(stub);
-          return stub;
-        },
-        createArbiter: arbiter.createArbiter,
-        probeFocusReporting: vi.fn(async () => true),
-        attachFocusReporting: vi.fn(() => vi.fn()),
-        notifyActivatedUnfocused: vi.fn(),
-        tickMs: 60_000,
-      },
-    );
-    const captured: CapturedCustom = { component: undefined, tui: makeFakeTui() };
-    const run = commandFrom(harness).handler("", makeContext(makeCustomMock(captured)));
-    await vi.waitFor(() => {
-      requireCallbacks(arbiter);
-    });
-    requireCallbacks(arbiter).onActivated("focus");
-    await run;
-
-    await expect(sessions[0]!.options.resolveMedia!()).resolves.toBeTypeOf("function");
-  });
-
   test("parks the session back to standby on floor loss without closing the enrollment", async () => {
     const harness = createRegistrationHarness();
     const sessions: Array<ReturnType<typeof makeSessionStub>> = [];
     const arbiter = makeFakeArbiter();
     registerOpenAILive(
       harness.pi,
-      () => makeResolvedConfig({ live: { enabled: true, voice: "sol", audioHost: "" } }),
+      () => makeResolvedConfig({ live: { enabled: true, voice: "sol" } }),
       {
         createSession: (options) => {
           const stub = makeSessionStub(options);
@@ -613,7 +315,7 @@ describe("registerOpenAILive", () => {
     const notifyUnfocused = vi.fn();
     registerOpenAILive(
       harness.pi,
-      () => makeResolvedConfig({ live: { enabled: true, voice: "sol", audioHost: "" } }),
+      () => makeResolvedConfig({ live: { enabled: true, voice: "sol" } }),
       {
         createSession: (options) => {
           const stub = makeSessionStub(options);
@@ -644,121 +346,5 @@ describe("registerOpenAILive", () => {
     expect(notifyUnfocused.mock.calls[0]?.[1]).toBe("project · session-7");
 
     await run;
-  });
-});
-
-describe("what a call costs", () => {
-  /** A local call whose session reports its billed seconds and then stays up until it is ended. */
-  async function localCall(report: (options: LiveSessionControllerOptions) => void) {
-    const harness = createRegistrationHarness();
-    const sessions: Array<ReturnType<typeof makeSessionStub>> = [];
-    const arbiter = makeFakeArbiter();
-    const notify = vi.fn();
-    registerOpenAILive(
-      harness.pi,
-      () => makeResolvedConfig({ live: { enabled: true, voice: "sol", audioHost: "" } }),
-      {
-        createSession: (options) => {
-          const stub = { ...makeSessionStub(options), start: vi.fn(async () => report(options)) };
-          sessions.push(stub);
-          return stub;
-        },
-        createArbiter: arbiter.createArbiter,
-        probeFocusReporting: vi.fn(async () => true),
-        attachFocusReporting: vi.fn(() => vi.fn()),
-        notifyActivatedUnfocused: vi.fn(),
-        tickMs: 60_000,
-      },
-    );
-    const captured: CapturedCustom = { component: undefined, tui: makeFakeTui() };
-    const ctx = makeContext(makeCustomMock(captured), notify);
-    const run = commandFrom(harness).handler("", ctx);
-    await vi.waitFor(() => requireCallbacks(arbiter));
-    requireCallbacks(arbiter).onActivated("focus");
-    await vi.waitFor(() => expect(sessions[0]?.start).toHaveBeenCalled());
-    const end = () => {
-      captured.component!.handleInput!("\u001b");
-      return run;
-    };
-    return { sessions, captured, notify, end };
-  }
-
-  const used = (percent: number) => ({ rate_limit: { primary_window: { used_percent: percent } } });
-
-  test("asks a session to hang up when idle and to park during work, as configured", async () => {
-    const { sessions, end } = await localCall(() => undefined);
-    const options = sessions[0]!.options;
-    expect(options.idleHangupSeconds).toBe(120);
-    expect(options.parkAfterSeconds).toBe(20);
-    // a computer's own media can always be closed and opened again
-    expect(options.canPark).toBeUndefined();
-    expect(typeof options.chat).toBe("function");
-    await end();
-  });
-
-  test("shows the connected time while the call runs, and sums it over the sessions", async () => {
-    const { sessions, captured, end } = await localCall((options) =>
-      options.callbacks.onUsage?.(192),
-    );
-    expect(captured.component!.render(80).join("\n")).toContain("3m 12s");
-    await end();
-    expect(sessions).toHaveLength(1);
-  });
-
-  test("leaves a readout of the time connected and how far the five-hour window moved", async () => {
-    vi.mocked(requestCodexUsage).mockResolvedValueOnce(used(12)).mockResolvedValueOnce(used(14));
-    const { notify, end } = await localCall((options) => options.callbacks.onUsage?.(192));
-    await end();
-    await vi.waitFor(() =>
-      expect(notify).toHaveBeenCalledWith(
-        "Live call: 3m 12s connected \u00b7 5-hour window 12% \u2192 14%",
-        "info",
-      ),
-    );
-  });
-
-  test("gives the time alone when the plan's meter cannot be read", async () => {
-    vi.mocked(requestCodexUsage).mockRejectedValue(new Error("Codex usage request failed (500)"));
-    try {
-      const { notify, end } = await localCall((options) => options.callbacks.onUsage?.(45));
-      await end();
-      await vi.waitFor(() =>
-        expect(notify).toHaveBeenCalledWith("Live call: 45s connected", "info"),
-      );
-    } finally {
-      vi.mocked(requestCodexUsage).mockReset();
-      vi.mocked(requestCodexUsage).mockResolvedValue(undefined);
-    }
-  });
-
-  test("warns when the server kept less of the voice's instructions than were sent", async () => {
-    const { notify, end } = await localCall((options) => {
-      options.callbacks.onInstructionsEcho?.({ sent: 9_000, echoed: 9_000 });
-      options.callbacks.onInstructionsEcho?.({ sent: 9_000, echoed: 4_096 });
-    });
-    expect(notify).toHaveBeenCalledOnce();
-    expect(notify).toHaveBeenCalledWith(expect.stringContaining("4096 of the 9000"), "warning");
-    await end();
-  });
-
-  test("says nothing of a call that never connected", async () => {
-    const { notify, end } = await localCall(() => undefined);
-    await end();
-    await new Promise((resolve) => setTimeout(resolve, 20));
-    expect(notify).not.toHaveBeenCalled();
-  });
-
-  test("resumes a parked call from the visualizer's key, and only then", async () => {
-    const { sessions, captured, end } = await localCall((options) =>
-      options.callbacks.onPhase("working"),
-    );
-    captured.component!.handleInput!("r");
-    expect(sessions[0]!.resume).not.toHaveBeenCalled();
-
-    sessions[0]!.options.callbacks.onPhase("parked");
-    expect(captured.component!.render(80).join("\n")).toContain("r resume");
-    captured.component!.handleInput!("r");
-    expect(sessions[0]!.resume).toHaveBeenCalledOnce();
-    await end();
   });
 });
