@@ -325,6 +325,29 @@ describe("the fork live bridge", () => {
       error: "Live voice is disabled. Enable it in /openai-settings.",
     });
   });
+  test("a pending native start cannot overwrite a call reserved during lazy loading", async () => {
+    const { live, pi, ctx } = await setup({
+      sessionFor: (options) => ({ ...makeSession(options), start: vi.fn(async () => undefined) }),
+    });
+    const command = vi.mocked(pi.registerCommand).mock.calls[0]![1];
+    vi.mocked(ctx.ui.custom).mockResolvedValue({});
+    const nativeStart = command.handler("", ctx);
+    const call = live.startCall(ctx, {
+      createMedia: () => {
+        throw new Error("unused");
+      },
+      callbacks: { onPhase: vi.fn(), onTranscript: vi.fn() },
+    });
+    try {
+      await nativeStart;
+      expect(ctx.ui.custom).not.toHaveBeenCalled();
+      expect(live.isActive()).toBe(true);
+    } finally {
+      call.stop();
+      await call.done;
+    }
+  });
+
   test("stop arriving with start cancels before lazy session construction", async () => {
     const { sessions, live } = await setup();
     const { client } = await open();
