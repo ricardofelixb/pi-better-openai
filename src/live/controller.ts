@@ -215,6 +215,7 @@ export class LiveSessionController {
         throw this.#failure ?? new Error("The live session stopped while recording began.");
       }
       this.#recorder = recorder;
+      transport.setMuted(this.#muted);
       await transport.connect();
       if (this.#stopped)
         throw this.#failure ?? new Error("The live session stopped while connecting.");

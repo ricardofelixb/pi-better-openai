@@ -207,6 +207,7 @@ export class CodexLiveTransport {
     await this.#connectSideband(signaling.callId, signaling.credentials, signaling.attestation);
     if (this.#state !== "connecting") throw abortReason(this.#operationSignal);
     this.#state = "connected";
+    peer.setMuted(this.#muted);
     peer.activate?.();
   }
 
