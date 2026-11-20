@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.3.8
+
+- Patch picomatch 4.0.7 against single-branch repeated-extglob ReDoS (GHSA-fc5q-39xc-vjpf), with bounded regression tests and source-hash verification before the advisory-specific audit exception. All other high-severity findings remain release blockers.
+
+- Add GPT-6.2 Astra and Sol fallbacks for native OpenAI and legacy Codex, preserving host catalog precedence, authentication, transports, and older model entries.
+- Include published context/output limits, reasoning mappings, Standard prices, and long-context tiers; retain conservative Codex context defaults.
+- Enable Fast defaults and global/US Responses Ultrafast for GPT-6.2, with the published promotional pricing notice. Preserve customized allowlists and reject unsupported regions/transports without downgrading.
+- Cover model metadata, live catalog precedence, credential preservation, default migration, and service-tier behavior with offline regression tests.
+
 ## 0.3.7
 
 - Load the image runtime, `sharp` and the live voice transport at first use instead of at extension load. Registration, commands and rendering are unchanged; fresh-process import time drops from about 87 ms to 61 ms.
