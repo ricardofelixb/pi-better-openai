@@ -1,6 +1,6 @@
 # Fork inventory
 
-This fork tracks `upstream/main` (baseline `4c41c25`) plus one feature: a local live voice bridge. Ovis is its first client, not a dependency. All other fork additions have been removed; upstream's prompt, configuration, native audio, floor queue, visualizer and tests remain upstream-owned.
+This fork tracks `upstream/main` (baseline `8223e54`) plus one feature: a local live voice bridge. Ovis is its first client, not a dependency. All other fork additions have been removed; upstream's prompt, configuration, native audio, floor queue, visualizer and tests remain upstream-owned.
 
 ## Fork-owned files
 
